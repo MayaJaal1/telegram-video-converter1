@@ -1,24 +1,77 @@
 import os
+import secrets
+
 from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    video = update.message.video or update.message.document
+# अपने channel usernames यहाँ डालो
+# उदाहरण: @source_channel
+SOURCE_CHANNEL = "@YOUR_SOURCE_CHANNEL"
+DESTINATION_CHANNEL = "@YOUR_DESTINATION_CHANNEL"
 
-    await update.message.reply_text(
-        f"✅ Video received!\n\n"
-        f"File ID:\n`{video.file_id}`\n\n"
-        f"Size: {video.file_size} bytes",
+
+async def channel_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post
+
+    if not message:
+        return
+
+    # केवल source channel के posts स्वीकार करो
+    if message.chat.username != SOURCE_CHANNEL.lstrip("@"):
+        return
+
+    # Video या video document check
+    if message.video:
+        file_id = message.video.file_id
+    elif message.document and message.document.mime_type:
+        if not message.document.mime_type.startswith("video/"):
+            return
+        file_id = message.document.file_id
+    else:
+        return
+
+    # Unique ID
+    video_id = secrets.token_urlsafe(8)
+
+    # अपने channel में video copy करो
+    copied = await context.bot.copy_message(
+        chat_id=DESTINATION_CHANNEL,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id
+    )
+
+    # अभी testing के लिए link message
+    await context.bot.send_message(
+        chat_id=DESTINATION_CHANNEL,
+        text=(
+            "🎬 Video Ready\n\n"
+            f"ID: `{video_id}`\n"
+            f"Source Message ID: `{copied.message_id}`"
+        ),
         parse_mode="Markdown"
     )
 
-app = Application.builder().token(BOT_TOKEN).build()
+    print(f"Video copied: {video_id}")
 
-app.add_handler(
-    MessageHandler(filters.VIDEO | filters.Document.VIDEO, receive_video)
-)
 
-print("Bot is running...")
-app.run_polling()
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(
+        MessageHandler(
+            filters.UpdateType.CHANNEL_POST,
+            channel_video
+        )
+    )
+
+    print("Bot is running...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
