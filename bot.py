@@ -1,59 +1,50 @@
 import os
-import secrets
 
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# अपने channel usernames यहाँ डालो
-# उदाहरण: @source_channel
-SOURCE_CHANNEL = "@YOUR_SOURCE_CHANNEL"
-DESTINATION_CHANNEL = "@YOUR_DESTINATION_CHANNEL"
 
-
-async def channel_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
 
     if not message:
         return
 
-    # केवल source channel के posts स्वीकार करो
-    if message.chat.username != SOURCE_CHANNEL.lstrip("@"):
-        return
+    # Channel की जानकारी
+    chat_id = message.chat.id
+    chat_title = message.chat.title
 
-    # Video या video document check
+    print(f"CHANNEL NAME: {chat_title}")
+    print(f"CHANNEL ID: {chat_id}")
+
+    # Video check
     if message.video:
-        file_id = message.video.file_id
+        print("VIDEO RECEIVED")
+        print(f"FILE ID: {message.video.file_id}")
+
+        await context.bot.send_message(
+            chat_id=message.chat.id,
+            text=(
+                "✅ Video detected!\n\n"
+                f"Channel: {chat_title}\n"
+                f"Channel ID: `{chat_id}`\n"
+                f"File ID:\n`{message.video.file_id}`"
+            ),
+            parse_mode="Markdown",
+        )
+
     elif message.document and message.document.mime_type:
-        if not message.document.mime_type.startswith("video/"):
-            return
-        file_id = message.document.file_id
-    else:
-        return
-
-    # Unique ID
-    video_id = secrets.token_urlsafe(8)
-
-    # अपने channel में video copy करो
-    copied = await context.bot.copy_message(
-        chat_id=DESTINATION_CHANNEL,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id
-    )
-
-    # अभी testing के लिए link message
-    await context.bot.send_message(
-        chat_id=DESTINATION_CHANNEL,
-        text=(
-            "🎬 Video Ready\n\n"
-            f"ID: `{video_id}`\n"
-            f"Source Message ID: `{copied.message_id}`"
-        ),
-        parse_mode="Markdown"
-    )
-
-    print(f"Video copied: {video_id}")
+        if message.document.mime_type.startswith("video/"):
+            print("VIDEO DOCUMENT RECEIVED")
+            print(f"CHANNEL ID: {chat_id}")
+            print(f"FILE ID: {message.document.file_id}")
 
 
 def main():
@@ -62,10 +53,11 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Channel posts
     app.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST,
-            channel_video
+            channel_post
         )
     )
 
