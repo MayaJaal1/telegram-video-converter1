@@ -17,7 +17,6 @@ console.log('=== ENV ===');
 console.log('BOT_TOKEN:', !!TOKEN, '| API_ID:', !!API_ID, '| API_HASH:', !!API_HASH);
 if (!TOKEN || !API_ID || !API_HASH) throw new Error('Missing credentials');
 
-// ============ REDIS ============
 let redis = null;
 try {
   const { Redis } = require('@upstash/redis');
@@ -100,27 +99,22 @@ async function shortenUrl(longUrl, ownerId) {
   return { slug, short: `https://${SHORT_DOMAIN}/${slug}` };
 }
 
-// ============ EXPRESS SERVER ============
 const app = express();
 app.use(express.json());
 
 app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-// API endpoint for shortening
 app.post('/api/shorten', async (req, res) => {
   try {
     const apiKey = req.headers['x-api-key'];
     const url = req.body.url;
     if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
     if (!url) return res.status(400).json({ error: 'Missing url' });
-
-    // find user by apiKey (scan memory - use redis index later)
     let user = null;
     for (const [k, v] of memDB.users.entries()) {
       if (v.apiKey === apiKey) { user = v; break; }
     }
     if (!user) return res.status(401).json({ error: 'Invalid API key' });
-
     const result = await shortenUrl(url, user.id);
     return res.json({ success: true, short: result.short, slug: result.slug });
   } catch (e) {
@@ -128,7 +122,6 @@ app.post('/api/shorten', async (req, res) => {
   }
 });
 
-// Short link redirect
 app.get('/:slug', async (req, res) => {
   const slug = req.params.slug;
   if (slug === 'health') return res.json({ ok: true });
@@ -146,7 +139,6 @@ app.get('/:slug', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
-// ============ BOT ============
 (async () => {
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
     connectionRetries: 5, autoReconnect: true,
@@ -155,7 +147,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
   await client.start({ botAuthToken: TOKEN });
   console.log('Bot connected!');
 
-  // Keyboard builder
   function keyboard(rows) {
     return new Api.ReplyInlineMarkup({
       rows: rows.map(row => new Api.KeyboardButtonRow({
@@ -164,7 +155,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
             return new Api.KeyboardButtonUrl({ text: btn.text, url: btn.url });
           }
           return new Api.KeyboardButtonCallback({
-            text: btn.text, data: Buffer.from(btn.callback_data),
+            text: btn.text,
+            data: Buffer.from(btn.callback_data || ''),
           });
         }),
       })),
@@ -196,7 +188,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     await client.sendMessage(chatId, { message: text, parseMode: 'html', buttons: keyboard(rows) });
   }
 
-  // ============ /start HANDLER ============
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
@@ -211,7 +202,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
   }, new NewMessage({}));
 
-  // ============ MESSAGE HANDLER (links) ============
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
@@ -229,7 +219,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     const urls = detectAllUrls(text);
     if (urls.length === 0) return;
 
-    // ====== SINGLE LINK ======
     if (urls.length === 1) {
       const status = await client.sendMessage(chatId, {
         message: `⚡ <i>Link convert ho raha hai...</i>`, parseMode: 'html',
@@ -238,7 +227,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         const result = await shortenUrl(urls[0], uid);
         user.linksCount = (user.linksCount || 0) + 1;
         await saveUser(uid, user);
-
         const report = `✅ <b>Link Converted Successfully!</b>\n\n` +
           `<b>Original Link:</b>\n${escapeHtml(urls[0])}\n\n` +
           `<b>Short Link:</b>\n${result.short}\n\n` +
@@ -248,7 +236,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `📅 <b>Created:</b> ${new Date().toLocaleString()}\n` +
           `♾️ <b>Valid For:</b> Permanent`;
         const rows = [
-          [{ text: '🔗 Open Link', url: result.short }, { text: '📋 Copy Slug', callback_data: 'copy_' + result.slug }],
+          [{ text: '🔗 Open Link', url: result.short }],
+          [{ text: '📋 Copy Slug', callback_data: 'copy_' + result.slug }],
           [{ text: '⬅️ Main Menu', callback_data: 'main_menu' }],
         ];
         await client.editMessage(chatId, { message: status.id, text: report, parseMode: 'html', buttons: keyboard(rows) });
@@ -258,7 +247,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== BULK LINKS (fast parallel) ======
     const status = await client.sendMessage(chatId, {
       message: `⏳ <b>Processing Your Links...</b>\n\nKripya thoda intezar karein.\nAapke ${urls.length} links convert ho rahe hain.`,
       parseMode: 'html',
@@ -266,7 +254,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
 
     const startTime = Date.now();
     try {
-      // Process in parallel batches for speed
       const CONCURRENCY = 50;
       const results = [];
       for (let i = 0; i < urls.length; i += CONCURRENCY) {
@@ -275,8 +262,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           batch.map(url => shortenUrl(url, uid).then(r => ({ original: url, ...r })).catch(e => ({ original: url, error: e.message })))
         );
         results.push(...batchResults);
-
-        // Progress update every batch
         if (i + CONCURRENCY < urls.length) {
           try {
             await client.editMessage(chatId, {
@@ -287,13 +272,10 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           } catch (e) {}
         }
       }
-
       const successful = results.filter(r => !r.error);
       user.linksCount = (user.linksCount || 0) + successful.length;
       await saveUser(uid, user);
-
       const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
-
       let reportText = `✅ <b>Conversion Complete!</b>\n\n` +
         `📊 <b>Total:</b> ${urls.length} links\n` +
         `✅ <b>Converted:</b> ${successful.length}\n` +
@@ -303,7 +285,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       for (let i = 0; i < Math.min(5, successful.length); i++) {
         reportText += `${i + 1}. ${successful[i].short}\n`;
       }
-
       await client.editMessage(chatId, {
         message: status.id, text: reportText, parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Main Menu', callback_data: 'main_menu' }]]),
@@ -313,7 +294,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
   }, new NewMessage({}));
 
-  // ============ CALLBACK HANDLER ============
   client.addEventHandler(async (event) => {
     const q = event.query;
     if (!q) return;
@@ -326,7 +306,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     let user = await getUser(uid);
     if (!user) user = await createUser(uid, 'user');
 
-    // ====== CONVERT ======
     if (data === 'menu_convert') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -337,7 +316,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== BULK ======
     if (data === 'menu_bulk') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -351,7 +329,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== INCOME ======
     if (data === 'menu_income') {
       const balance = (user.balance || 0).toFixed(2);
       const clicks = user.clicks || 0;
@@ -378,7 +355,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== TRANSFER ======
     if (data === 'menu_transfer') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -393,7 +369,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== ALL BOTS ======
     if (data === 'menu_allbots') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -410,7 +385,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== API CONNECT ======
     if (data === 'menu_api') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -431,7 +405,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== ACCOUNT ======
     if (data === 'menu_account') {
       const joined = new Date(user.joined).toLocaleDateString();
       await client.editMessage(chatId, {
@@ -454,7 +427,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== LOGOUT ======
     if (data === 'menu_logout') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -471,13 +443,11 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== MAIN MENU ======
     if (data === 'main_menu') {
       await sendMenu(chatId, msgId);
       return;
     }
 
-    // ====== RESET API ======
     if (data === 'reset_api') {
       user.apiKey = crypto.randomBytes(16).toString('hex');
       await saveUser(uid, user);
@@ -490,7 +460,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== PRIVACY ======
     if (data === 'privacy') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -506,7 +475,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== API DOCS ======
     if (data === 'api_docs') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -522,7 +490,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== CONFIRM LOGOUT ======
     if (data === 'confirm_logout') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -532,7 +499,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== WITHDRAW ======
     if (data === 'withdraw') {
       await client.editMessage(chatId, {
         message: msgId,
@@ -547,7 +513,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== COPY SAMPLE ======
     if (data === 'copy_sample') {
       await client.sendMessage(chatId, {
         message: `<b>Sample Format:</b>\n<code>https://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123</code>`,
@@ -556,7 +521,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
 
-    // ====== COPY SLUG ======
     if (data.startsWith('copy_')) {
       const slug = data.replace('copy_', '');
       const link = `https://${SHORT_DOMAIN}/${slug}`;
