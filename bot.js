@@ -4,6 +4,7 @@ const { TelegramClient, Api } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
 const { CallbackQuery } = require('telegram/events/CallbackQuery');
+const axios = require('axios');
 const crypto = require('crypto');
 
 const TOKEN = (process.env.BOT_TOKEN || '').trim();
@@ -12,62 +13,104 @@ const API_HASH = (process.env.TELEGRAM_API_HASH || '').trim();
 const SHORT_DOMAIN = (process.env.SHORT_DOMAIN || 'm.mayajaal.online').trim();
 const BASE_URL = (process.env.BASE_URL || 'https://mayajaal.online').trim();
 const PORT = parseInt(process.env.PORT || '8090', 10);
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').trim();
+const SUPABASE_KEY = (process.env.SUPABASE_KEY || '').trim();
 
 console.log('=== ENV ===');
 console.log('BOT_TOKEN:', !!TOKEN, '| API_ID:', !!API_ID, '| API_HASH:', !!API_HASH);
+console.log('SUPABASE:', !!SUPABASE_URL, !!SUPABASE_KEY);
 if (!TOKEN || !API_ID || !API_HASH) throw new Error('Missing credentials');
+if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Missing Supabase config');
 
-let redis = null;
-try {
-  const { Redis } = require('@upstash/redis');
-  redis = Redis.fromEnv();
-  console.log('Redis connected');
-} catch (e) {
-  console.log('Redis not available, memory mode');
+// ============ SUPABASE REST HELPERS ============
+const SB_HEADERS = {
+  'apikey': SUPABASE_KEY,
+  'Authorization': `Bearer ${SUPABASE_KEY}`,
+  'Content-Type': 'application/json',
+  'Prefer': 'return=representation',
+};
+
+async function sbGet(table, query = '') {
+  try {
+    const r = await axios.get(`${SUPABASE_URL}/rest/v1/${table}${query}`, { headers: SB_HEADERS, timeout: 10000 });
+    return r.data || [];
+  } catch (e) {
+    console.error('[SB GET]', e.message);
+    return [];
+  }
 }
 
-const memDB = { users: new Map(), links: new Map() };
+async function sbUpsert(table, data, conflictCol = 'id') {
+  try {
+    const r = await axios.post(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflictCol}`, data, {
+      headers: { ...SB_HEADERS, 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      timeout: 10000,
+    });
+    return r.data;
+  } catch (e) {
+    console.error('[SB UPSERT]', e.response ? e.response.data : e.message);
+    return null;
+  }
+}
+
+async function sbPatch(table, query, data) {
+  try {
+    const r = await axios.patch(`${SUPABASE_URL}/rest/v1/${table}${query}`, data, {
+      headers: SB_HEADERS, timeout: 10000,
+    });
+    return r.data;
+  } catch (e) {
+    console.error('[SB PATCH]', e.message);
+    return null;
+  }
+}
 
 async function getUser(userId) {
-  const key = String(userId);
-  if (redis) {
-    const raw = await redis.get(`user:${key}`).catch(() => null);
-    if (raw) return typeof raw === 'string' ? JSON.parse(raw) : raw;
-  }
-  return memDB.users.get(key) || null;
+  const rows = await sbGet('users', `?id=eq.${encodeURIComponent(userId)}&limit=1`);
+  return rows && rows[0] ? rows[0] : null;
 }
 
 async function saveUser(userId, data) {
-  const key = String(userId);
-  memDB.users.set(key, data);
-  if (redis) await redis.set(`user:${key}`, JSON.stringify(data)).catch(() => {});
+  const payload = {
+    id: String(userId),
+    username: data.username || 'user',
+    joined: data.joined || Date.now(),
+    balance: data.balance || 0,
+    links_count: data.links_count || 0,
+    clicks: data.clicks || 0,
+    api_key: data.api_key,
+  };
+  return sbUpsert('users', payload, 'id');
 }
 
 async function createUser(userId, username) {
   const user = {
-    id: userId,
+    id: String(userId),
     username: username || 'user',
     joined: Date.now(),
     balance: 0,
-    linksCount: 0,
+    links_count: 0,
     clicks: 0,
-    apiKey: crypto.randomBytes(16).toString('hex'),
+    api_key: crypto.randomBytes(16).toString('hex'),
   };
   await saveUser(userId, user);
   return user;
 }
 
-async function saveLink(slug, data) {
-  memDB.links.set(slug, data);
-  if (redis) await redis.set(`link:${slug}`, JSON.stringify(data), { ex: 365 * 86400 }).catch(() => {});
+async function getLink(slug) {
+  const rows = await sbGet('links', `?slug=eq.${encodeURIComponent(slug)}&limit=1`);
+  return rows && rows[0] ? rows[0] : null;
 }
 
-async function getLink(slug) {
-  if (redis) {
-    const raw = await redis.get(`link:${slug}`).catch(() => null);
-    if (raw) return typeof raw === 'string' ? JSON.parse(raw) : raw;
-  }
-  return memDB.links.get(slug) || null;
+async function saveLink(slug, data) {
+  const payload = {
+    slug,
+    url: data.url,
+    owner_id: String(data.owner_id),
+    views: data.views || 0,
+    created: data.created || Date.now(),
+  };
+  return sbUpsert('links', payload, 'slug');
 }
 
 function escapeHtml(s = '') {
@@ -98,10 +141,7 @@ function getDomainName(url) {
 async function shortenUrl(longUrl, ownerId) {
   const slug = crypto.randomBytes(5).toString('hex');
   await saveLink(slug, {
-    url: longUrl,
-    ownerId: String(ownerId),
-    views: 0,
-    created: Date.now(),
+    url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now(),
   });
   return { slug, short: `https://${SHORT_DOMAIN}/${slug}` };
 }
@@ -117,10 +157,8 @@ app.post('/api/shorten', async (req, res) => {
     const url = req.body.url;
     if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
     if (!url) return res.status(400).json({ error: 'Missing url' });
-    let user = null;
-    for (const [k, v] of memDB.users.entries()) {
-      if (v.apiKey === apiKey) { user = v; break; }
-    }
+    const users = await sbGet('users', `?api_key=eq.${encodeURIComponent(apiKey)}&limit=1`);
+    const user = users && users[0];
     if (!user) return res.status(401).json({ error: 'Invalid API key' });
     const result = await shortenUrl(url, user.id);
     return res.json({ success: true, short: result.short, slug: result.slug });
@@ -134,13 +172,13 @@ app.get('/:slug', async (req, res) => {
   if (slug === 'health') return res.json({ ok: true });
   const link = await getLink(slug);
   if (!link) return res.status(404).send('Link not found');
-  link.views = (link.views || 0) + 1;
-  await saveLink(slug, link);
-  const user = await getUser(link.ownerId);
+  await sbPatch('links', `?slug=eq.${encodeURIComponent(slug)}`, { views: (link.views || 0) + 1 });
+  const user = await getUser(link.owner_id);
   if (user) {
-    user.balance = (user.balance || 0) + 0.05;
-    user.clicks = (user.clicks || 0) + 1;
-    await saveUser(link.ownerId, user);
+    await sbPatch('users', `?id=eq.${encodeURIComponent(user.id)}`, {
+      balance: parseFloat(user.balance || 0) + 0.05,
+      clicks: (user.clicks || 0) + 1,
+    });
   }
   return res.redirect(link.url);
 });
@@ -148,8 +186,7 @@ app.get('/:slug', async (req, res) => {
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
 (async () => {
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
-    connectionRetries: 5,
-    autoReconnect: true,
+    connectionRetries: 5, autoReconnect: true,
   });
   console.log('Connecting MTProto...');
   await client.start({ botAuthToken: TOKEN });
@@ -229,13 +266,11 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
 
     if (urls.length === 1) {
       const status = await client.sendMessage(chatId, {
-        message: `⚡ <i>Link convert ho raha hai...</i>`,
-        parseMode: 'html',
+        message: `⚡ <i>Link convert ho raha hai...</i>`, parseMode: 'html',
       });
       try {
         const result = await shortenUrl(urls[0], uid);
-        user.linksCount = (user.linksCount || 0) + 1;
-        await saveUser(uid, user);
+        await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + 1 });
         const report = `✅ <b>Link Converted Successfully!</b>\n\n` +
           `<b>Original Link:</b>\n${escapeHtml(urls[0])}\n\n` +
           `<b>Short Link:</b>\n${result.short}\n\n` +
@@ -282,8 +317,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         }
       }
       const successful = results.filter(r => !r.error);
-      user.linksCount = (user.linksCount || 0) + successful.length;
-      await saveUser(uid, user);
+      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + successful.length });
       const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
       let reportText = `✅ <b>Conversion Complete!</b>\n\n` +
         `📊 <b>Total:</b> ${urls.length} links\n` +
@@ -295,9 +329,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         reportText += `${i + 1}. ${successful[i].short}\n`;
       }
       await client.editMessage(chatId, {
-        message: status.id,
-        text: reportText,
-        parseMode: 'html',
+        message: status.id, text: reportText, parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Main Menu', callback_data: 'main_menu' }]]),
       });
     } catch (e) {
@@ -341,11 +373,11 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
 
     if (data === 'menu_income') {
-      const balance = (user.balance || 0).toFixed(2);
+      const balance = parseFloat(user.balance || 0).toFixed(2);
       const clicks = user.clicks || 0;
-      const links = user.linksCount || 0;
-      const today = (user.balance * 0.08).toFixed(2);
-      const week = (user.balance * 0.35).toFixed(2);
+      const links = user.links_count || 0;
+      const today = (parseFloat(balance) * 0.08).toFixed(2);
+      const week = (parseFloat(balance) * 0.35).toFixed(2);
       await client.editMessage(chatId, {
         message: msgId,
         text: `💰 <b>Your Income</b>\n\n` +
@@ -372,8 +404,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         text: `📊 <b>View Transfer</b>\n\nAap apne transfer ka pura record yahan dekh sakte hain.\n\n` +
           `<b>Recent Transfers:</b>\n` +
           `<i>Abhi koi transfer nahi hai.</i>\n\n` +
-          `Total: ${user.linksCount || 0} links\n` +
-          `Balance: ₹${(user.balance || 0).toFixed(2)}`,
+          `Total: ${user.links_count || 0} links\n` +
+          `Balance: ₹${parseFloat(user.balance || 0).toFixed(2)}`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
       });
@@ -405,7 +437,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `✅ 1000+ Links Support\n` +
           `✅ Full Documentation\n` +
           `✅ Example Code (Python, Node.js, PHP)\n\n` +
-          `<b>Your API Key:</b>\n<code>${user.apiKey}</code>`,
+          `<b>Your API Key:</b>\n<code>${user.api_key}</code>`,
         parseMode: 'html',
         buttons: keyboard([
           [{ text: '📖 API Docs', callback_data: 'api_docs' }],
@@ -424,9 +456,9 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `<b>Username:</b> @${user.username}\n` +
           `<b>User ID:</b> ${user.id}\n` +
           `<b>Joined:</b> ${joined}\n` +
-          `<b>Total Links:</b> ${user.linksCount || 0}\n` +
+          `<b>Total Links:</b> ${user.links_count || 0}\n` +
           `<b>Total Clicks:</b> ${user.clicks || 0}\n` +
-          `<b>Balance:</b> ₹${(user.balance || 0).toFixed(2)}`,
+          `<b>Balance:</b> ₹${parseFloat(user.balance || 0).toFixed(2)}`,
         parseMode: 'html',
         buttons: keyboard([
           [{ text: '🔄 Reset API Key', callback_data: 'reset_api' }],
@@ -460,11 +492,11 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
 
     if (data === 'reset_api') {
-      user.apiKey = crypto.randomBytes(16).toString('hex');
-      await saveUser(uid, user);
+      const newKey = crypto.randomBytes(16).toString('hex');
+      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: newKey });
       await client.editMessage(chatId, {
         message: msgId,
-        text: `✅ <b>API Key Reset!</b>\n\n<b>New Key:</b>\n<code>${user.apiKey}</code>\n\n<i>Purani key ab kaam nahi karegi.</i>`,
+        text: `✅ <b>API Key Reset!</b>\n\n<b>New Key:</b>\n<code>${newKey}</code>\n\n<i>Purani key ab kaam nahi karegi.</i>`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
       });
@@ -491,7 +523,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         message: msgId,
         text: `📖 <b>API Documentation</b>\n\n` +
           `<b>Endpoint:</b>\n<code>POST https://${SHORT_DOMAIN}/api/shorten</code>\n\n` +
-          `<b>Headers:</b>\n<code>x-api-key: ${user.apiKey}</code>\n` +
+          `<b>Headers:</b>\n<code>x-api-key: ${user.api_key}</code>\n` +
           `<code>Content-Type: application/json</code>\n\n` +
           `<b>Body:</b>\n<code>{"url": "https://example.com"}</code>\n\n` +
           `<b>Response:</b>\n<code>{"success": true, "short": "https://${SHORT_DOMAIN}/abc123"}</code>`,
@@ -516,7 +548,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         text: `💸 <b>Withdraw / Payout Info</b>\n\n` +
           `<b>Minimum withdrawal:</b> ₹500\n\n` +
           `<b>Methods:</b>\n• UPI\n• Paytm\n• Bank Transfer\n\n` +
-          `Aapka current balance: <b>₹${(user.balance || 0).toFixed(2)}</b>\n\n` +
+          `Aapka current balance: <b>₹${parseFloat(user.balance || 0).toFixed(2)}</b>\n\n` +
           `<i>₹500 pura hone par withdraw button active ho jayega.</i>`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
@@ -543,5 +575,5 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
   }, new CallbackQuery({}));
 
-  console.log('Bot ready - MayaJaal Converter');
+  console.log('Bot ready - MayaJaal Converter (Supabase)');
 })();
