@@ -146,7 +146,7 @@ function getDomainName(url) {
   catch (e) { return 'Unknown'; }
 }
 
-// ============ RATE LIMIT (per user) ============
+// ============ RATE LIMIT ============
 const rateLimitMap = new Map();
 function checkRateLimit(userId, maxPerMin = 60) {
   const now = Date.now();
@@ -162,7 +162,7 @@ setInterval(() => {
   for (const [k, v] of rateLimitMap.entries()) if (now > v.reset) rateLimitMap.delete(k);
 }, 120000);
 
-// ============ SHORTEN WITH SIGNATURE ============
+// ============ SHORTEN ============
 async function shortenUrl(longUrl, ownerId) {
   const slug = crypto.randomBytes(5).toString('hex');
   const sig = signSlug(slug);
@@ -176,7 +176,6 @@ async function shortenUrl(longUrl, ownerId) {
 const app = express();
 app.use(express.json());
 
-// Basic security headers
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -208,10 +207,9 @@ app.get('/:slug', async (req, res) => {
   const sig = req.query.s || '';
   if (slug === 'health') return res.json({ ok: true });
 
-  // HMAC signature verify — KOI PROXY SE NAHI TODO SAKTA
   const expectedSig = signSlug(slug);
   if (sig !== expectedSig) {
-    return res.status(403).send('❌ Invalid or tampered link');
+    return res.status(403).send('Invalid or tampered link');
   }
 
   const link = await getLink(slug);
@@ -307,9 +305,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       user = await createUser(uid, sender?.username || 'user');
     }
 
-    // Rate limit check
     if (!checkRateLimit(uid, 60)) {
-      return client.sendMessage(chatId, { message: `⚠️ <b>Rate limit exceeded</b>\n\nAap 1 minute me 60 se zyada links convert nahi kar sakte. Thoda ruk ke try karein.`, parseMode: 'html' });
+      return client.sendMessage(chatId, { message: `⚠️ <b>Rate limit exceeded</b>\n\nAap 1 minute me 60 se zyada links convert nahi kar sakte.`, parseMode: 'html' });
     }
 
     const urls = detectAllUrls(text);
@@ -331,7 +328,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `🔒 <b>Signature:</b> <code>${result.sig}</code>\n` +
           `📅 <b>Created:</b> ${new Date().toLocaleString()}\n` +
           `♾️ <b>Valid For:</b> Permanent\n\n` +
-          `⚠️ <i>Ye signed link sirf isi form me kaam karega. Signature hata ke ya modify karke kaam nahi karega.</i>`;
+          `⚠️ <i>Ye signed link sirf isi form me kaam karega.</i>`;
         const rows = [
           [{ text: '🔗 Open Link', url: result.short }],
           [{ text: '📋 Copy Full Link', callback_data: 'copy_' + result.slug }],
@@ -416,7 +413,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     if (data === 'menu_bulk') {
       await client.editMessage(chatId, {
         message: msgId,
-        text: `🗂 <b>Bulk Link Converter</b>\n\nEk baar me <b>1000+ links</b> convert karein — <b>Super Fast!</b>\n\n<b>Steps:</b>\n1. Links ko text format me bhejein\n2. Ek line me ek link\n3. 1000+ links supported\n4. Kuch hi second me sab convert\n\n<b>Max Links Per Request:</b> 1000+\n<b>Speed:</b> ~50 links/second\n<b>Rate Limit:</b> 60 links/minute\n\n🔒 <b>All links are signed & secure</b>\n\n<b>Sample Format:</b>\nhttps://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123`,
+        text: `🗂 <b>Bulk Link Converter</b>\n\nEk baar me <b>1000+ links</b> convert karein — <b>Super Fast!</b>\n\n<b>Steps:</b>\n1. Links ko text format me bhejein\n2. Ek line me ek link\n3. 1000+ links supported\n4. Kuch hi second me sab convert\n\n<b>Max:</b> 1000+\n<b>Speed:</b> ~50 links/second\n<b>Rate Limit:</b> 60 links/minute\n\n🔒 <b>All links are signed & secure</b>\n\n<b>Sample Format:</b>\nhttps://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123`,
         parseMode: 'html',
         buttons: keyboard([
           [{ text: '📥 Copy Sample Format', callback_data: 'copy_sample' }],
@@ -441,7 +438,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `📅 <b>Today:</b> ₹${today}\n` +
           `📅 <b>This Week:</b> ₹${week}\n` +
           `📅 <b>This Month:</b> ₹${balance}\n\n` +
-          `💡 <i>Income link conversion, ads & referrals se hota hai.\nPer click ₹0.05 milta hai.</i>`,
+          `💡 <i>Per click ₹0.05 milta hai.</i>`,
         parseMode: 'html',
         buttons: keyboard([
           [{ text: '💸 Withdraw / Payout', callback_data: 'withdraw' }],
@@ -582,8 +579,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `<b>Headers:</b>\n<code>x-api-key: ${user.api_key}</code>\n` +
           `<code>Content-Type: application/json</code>\n\n` +
           `<b>Body:</b>\n<code>{"url": "https://example.com"}</code>\n\n` +
-          `<b>Response:</b>\n<code>{"success": true, "short": "https://${SHORT_DOMAIN}/abc123?s=xxx", "slug": "abc123", "sig": "xxx"}</code>\n\n` +
-          `⚠️ <i>Signed links — response ka <code>short</code> directly use karo, signature hata ke kaam nahi karega.</i>`,
+          `<b>Response:</b>\n<code>{"success": true, "short": "https://${SHORT_DOMAIN}/abc123?s=xxx"}</code>\n\n` +
+          `⚠️ <i>Signed links — response ka <code>short</code> directly use karo.</i>`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
       });
@@ -605,8 +602,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         text: `💸 <b>Withdraw / Payout Info</b>\n\n` +
           `<b>Minimum withdrawal:</b> ₹500\n\n` +
           `<b>Methods:</b>\n• UPI\n• Paytm\n• Bank Transfer\n\n` +
-          `Aapka current balance: <b>₹${parseFloat(user.balance || 0).toFixed(2)}</b>\n\n` +
-          `<i>₹500 pura hone par withdraw button active ho jayega.</i>`,
+          `Aapka current balance: <b>₹${parseFloat(user.balance || 0).toFixed(2)}</b>`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
       });
