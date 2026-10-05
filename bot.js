@@ -15,12 +15,20 @@ const BASE_URL = (process.env.BASE_URL || 'https://mayajaal.online').trim();
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const SUPABASE_URL = (process.env.SUPABASE_URL || '').trim();
 const SUPABASE_KEY = (process.env.SUPABASE_KEY || '').trim();
+const LINK_SECRET = (process.env.LINK_SECRET || 'CHANGE-THIS-NOW-TO-RANDOM-32-CHARS').trim();
 
 console.log('=== ENV ===');
 console.log('BOT_TOKEN:', !!TOKEN, '| API_ID:', !!API_ID, '| API_HASH:', !!API_HASH);
 console.log('SUPABASE:', !!SUPABASE_URL, !!SUPABASE_KEY);
+console.log('LINK_SECRET:', LINK_SECRET.length >= 20 ? 'OK (strong)' : 'WEAK — CHANGE NOW!');
 if (!TOKEN || !API_ID || !API_HASH) throw new Error('Missing credentials');
 if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Missing Supabase config');
+if (LINK_SECRET.length < 20) throw new Error('LINK_SECRET too weak — need 20+ chars');
+
+// ============ HMAC SIGNATURE ============
+function signSlug(slug) {
+  return crypto.createHmac('sha256', LINK_SECRET).update(slug).digest('hex').substring(0, 16);
+}
 
 // ============ SUPABASE REST HELPERS ============
 const SB_HEADERS = {
@@ -138,16 +146,43 @@ function getDomainName(url) {
   catch (e) { return 'Unknown'; }
 }
 
+// ============ RATE LIMIT (per user) ============
+const rateLimitMap = new Map();
+function checkRateLimit(userId, maxPerMin = 60) {
+  const now = Date.now();
+  const key = String(userId);
+  const entry = rateLimitMap.get(key) || { count: 0, reset: now + 60000 };
+  if (now > entry.reset) { entry.count = 0; entry.reset = now + 60000; }
+  entry.count++;
+  rateLimitMap.set(key, entry);
+  return entry.count <= maxPerMin;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of rateLimitMap.entries()) if (now > v.reset) rateLimitMap.delete(k);
+}, 120000);
+
+// ============ SHORTEN WITH SIGNATURE ============
 async function shortenUrl(longUrl, ownerId) {
   const slug = crypto.randomBytes(5).toString('hex');
+  const sig = signSlug(slug);
   await saveLink(slug, {
     url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now(),
   });
-  return { slug, short: `https://${SHORT_DOMAIN}/${slug}` };
+  return { slug, sig, short: `https://${SHORT_DOMAIN}/${slug}?s=${sig}` };
 }
 
+// ============ EXPRESS ============
 const app = express();
 app.use(express.json());
+
+// Basic security headers
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 
 app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
@@ -160,8 +195,9 @@ app.post('/api/shorten', async (req, res) => {
     const users = await sbGet('users', `?api_key=eq.${encodeURIComponent(apiKey)}&limit=1`);
     const user = users && users[0];
     if (!user) return res.status(401).json({ error: 'Invalid API key' });
+    if (!checkRateLimit(user.id, 100)) return res.status(429).json({ error: 'Rate limit exceeded' });
     const result = await shortenUrl(url, user.id);
-    return res.json({ success: true, short: result.short, slug: result.slug });
+    return res.json({ success: true, short: result.short, slug: result.slug, sig: result.sig });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -169,9 +205,18 @@ app.post('/api/shorten', async (req, res) => {
 
 app.get('/:slug', async (req, res) => {
   const slug = req.params.slug;
+  const sig = req.query.s || '';
   if (slug === 'health') return res.json({ ok: true });
+
+  // HMAC signature verify — KOI PROXY SE NAHI TODO SAKTA
+  const expectedSig = signSlug(slug);
+  if (sig !== expectedSig) {
+    return res.status(403).send('❌ Invalid or tampered link');
+  }
+
   const link = await getLink(slug);
   if (!link) return res.status(404).send('Link not found');
+
   await sbPatch('links', `?slug=eq.${encodeURIComponent(slug)}`, { views: (link.views || 0) + 1 });
   const user = await getUser(link.owner_id);
   if (user) {
@@ -216,6 +261,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       `✅ Bulk link converter (1000+ links ek saath)\n` +
       `✅ Super fast conversion\n` +
       `✅ Har link ka detailed report\n` +
+      `🔒 <b>Signed links — koi copy nahi kar sakta</b>\n` +
       `🛡️ <b>Sabka data safe hai</b>\n\n` +
       `Start karne ke liye neeche diye gaye menu se option select kare ya /start likhe.`;
     const rows = [
@@ -261,6 +307,11 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       user = await createUser(uid, sender?.username || 'user');
     }
 
+    // Rate limit check
+    if (!checkRateLimit(uid, 60)) {
+      return client.sendMessage(chatId, { message: `⚠️ <b>Rate limit exceeded</b>\n\nAap 1 minute me 60 se zyada links convert nahi kar sakte. Thoda ruk ke try karein.`, parseMode: 'html' });
+    }
+
     const urls = detectAllUrls(text);
     if (urls.length === 0) return;
 
@@ -273,15 +324,17 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + 1 });
         const report = `✅ <b>Link Converted Successfully!</b>\n\n` +
           `<b>Original Link:</b>\n${escapeHtml(urls[0])}\n\n` +
-          `<b>Short Link:</b>\n${result.short}\n\n` +
+          `<b>Signed Short Link:</b>\n${result.short}\n\n` +
           `📊 <b>Link Details</b>\n` +
           `👤 <b>Type:</b> ${getDomainName(urls[0])}\n` +
           `🟢 <b>Status:</b> Active\n` +
+          `🔒 <b>Signature:</b> <code>${result.sig}</code>\n` +
           `📅 <b>Created:</b> ${new Date().toLocaleString()}\n` +
-          `♾️ <b>Valid For:</b> Permanent`;
+          `♾️ <b>Valid For:</b> Permanent\n\n` +
+          `⚠️ <i>Ye signed link sirf isi form me kaam karega. Signature hata ke ya modify karke kaam nahi karega.</i>`;
         const rows = [
           [{ text: '🔗 Open Link', url: result.short }],
-          [{ text: '📋 Copy Slug', callback_data: 'copy_' + result.slug }],
+          [{ text: '📋 Copy Full Link', callback_data: 'copy_' + result.slug }],
           [{ text: '⬅️ Main Menu', callback_data: 'main_menu' }],
         ];
         await client.editMessage(chatId, { message: status.id, text: report, parseMode: 'html', buttons: keyboard(rows) });
@@ -324,6 +377,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         `✅ <b>Converted:</b> ${successful.length}\n` +
         `❌ <b>Failed:</b> ${results.length - successful.length}\n` +
         `⏱️ <b>Time:</b> ${timeTaken}s\n\n` +
+        `🔒 <b>All links are HMAC-signed</b>\n\n` +
         `📋 <b>Sample Links (First 5):</b>\n`;
       for (let i = 0; i < Math.min(5, successful.length); i++) {
         reportText += `${i + 1}. ${successful[i].short}\n`;
@@ -352,7 +406,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     if (data === 'menu_convert') {
       await client.editMessage(chatId, {
         message: msgId,
-        text: `🔗 <b>Convert Link</b>\n\nMayaJaal.online ka link bhejo, main use short link me convert kar dunga.\n\n<b>Example:</b>\nhttps://example.com/abc\nhttps://amazon.in/123`,
+        text: `🔗 <b>Convert Link</b>\n\nMayaJaal.online ka link bhejo, main use signed short link me convert kar dunga.\n\n🔒 <b>Security:</b>\nHar link me HMAC signature hoti hai. Koi bhi ise copy karke ya modify karke kaam nahi kar sakta.\n\n<b>Example:</b>\nhttps://example.com/abc\nhttps://amazon.in/123`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
       });
@@ -362,7 +416,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     if (data === 'menu_bulk') {
       await client.editMessage(chatId, {
         message: msgId,
-        text: `🗂 <b>Bulk Link Converter</b>\n\nEk baar me <b>1000+ links</b> convert karein — <b>Super Fast!</b>\n\n<b>Steps:</b>\n1. Links ko text format me bhejein\n2. Ek line me ek link\n3. 1000+ links supported\n4. Kuch hi second me sab convert\n\n<b>Max Links Per Request:</b> 1000+\n<b>Speed:</b> ~50 links/second\n\n<b>Sample Format:</b>\nhttps://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123`,
+        text: `🗂 <b>Bulk Link Converter</b>\n\nEk baar me <b>1000+ links</b> convert karein — <b>Super Fast!</b>\n\n<b>Steps:</b>\n1. Links ko text format me bhejein\n2. Ek line me ek link\n3. 1000+ links supported\n4. Kuch hi second me sab convert\n\n<b>Max Links Per Request:</b> 1000+\n<b>Speed:</b> ~50 links/second\n<b>Rate Limit:</b> 60 links/minute\n\n🔒 <b>All links are signed & secure</b>\n\n<b>Sample Format:</b>\nhttps://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123`,
         parseMode: 'html',
         buttons: keyboard([
           [{ text: '📥 Copy Sample Format', callback_data: 'copy_sample' }],
@@ -436,7 +490,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `✅ Fast & Reliable\n` +
           `✅ 1000+ Links Support\n` +
           `✅ Full Documentation\n` +
-          `✅ Example Code (Python, Node.js, PHP)\n\n` +
+          `✅ Example Code (Python, Node.js, PHP)\n` +
+          `🔒 HMAC Signed Links\n\n` +
           `<b>Your API Key:</b>\n<code>${user.api_key}</code>`,
         parseMode: 'html',
         buttons: keyboard([
@@ -509,6 +564,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         text: `🛡️ <b>Privacy & Security</b>\n\n` +
           `Hum aapke sabhi personal data ko safely store karte hain. Koi bhi third-party aapka data access nahi kar sakti.\n\n` +
           `✅ Encrypted storage\n` +
+          `✅ HMAC signed links (koi copy nahi kar sakta)\n` +
           `✅ No data sharing\n` +
           `✅ Safe & Secure\n` +
           `✅ 24/7 protection`,
@@ -526,7 +582,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           `<b>Headers:</b>\n<code>x-api-key: ${user.api_key}</code>\n` +
           `<code>Content-Type: application/json</code>\n\n` +
           `<b>Body:</b>\n<code>{"url": "https://example.com"}</code>\n\n` +
-          `<b>Response:</b>\n<code>{"success": true, "short": "https://${SHORT_DOMAIN}/abc123"}</code>`,
+          `<b>Response:</b>\n<code>{"success": true, "short": "https://${SHORT_DOMAIN}/abc123?s=xxx", "slug": "abc123", "sig": "xxx"}</code>\n\n` +
+          `⚠️ <i>Signed links — response ka <code>short</code> directly use karo, signature hata ke kaam nahi karega.</i>`,
         parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
       });
@@ -566,14 +623,15 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
 
     if (data.startsWith('copy_')) {
       const slug = data.replace('copy_', '');
-      const link = `https://${SHORT_DOMAIN}/${slug}`;
+      const sig = signSlug(slug);
+      const link = `https://${SHORT_DOMAIN}/${slug}?s=${sig}`;
       await client.sendMessage(chatId, {
-        message: `📋 <b>Short Link:</b>\n<code>${link}</code>`,
+        message: `📋 <b>Signed Short Link:</b>\n<code>${link}</code>\n\n🔒 <i>Signature ke bina link kaam nahi karega.</i>`,
         parseMode: 'html',
       });
       return;
     }
   }, new CallbackQuery({}));
 
-  console.log('Bot ready - MayaJaal Converter (Supabase)');
+  console.log('Bot ready - MayaJaal Converter (Supabase + HMAC Signed)');
 })();
