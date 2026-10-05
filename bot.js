@@ -45,8 +45,12 @@ async function saveUser(userId, data) {
 
 async function createUser(userId, username) {
   const user = {
-    id: userId, username: username || 'user',
-    joined: Date.now(), balance: 0, linksCount: 0, clicks: 0,
+    id: userId,
+    username: username || 'user',
+    joined: Date.now(),
+    balance: 0,
+    linksCount: 0,
+    clicks: 0,
     apiKey: crypto.randomBytes(16).toString('hex'),
   };
   await saveUser(userId, user);
@@ -94,7 +98,10 @@ function getDomainName(url) {
 async function shortenUrl(longUrl, ownerId) {
   const slug = crypto.randomBytes(5).toString('hex');
   await saveLink(slug, {
-    url: longUrl, ownerId: String(ownerId), views: 0, created: Date.now(),
+    url: longUrl,
+    ownerId: String(ownerId),
+    views: 0,
+    created: Date.now(),
   });
   return { slug, short: `https://${SHORT_DOMAIN}/${slug}` };
 }
@@ -141,7 +148,8 @@ app.get('/:slug', async (req, res) => {
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
 (async () => {
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
-    connectionRetries: 5, autoReconnect: true,
+    connectionRetries: 5,
+    autoReconnect: true,
   });
   console.log('Connecting MTProto...');
   await client.start({ botAuthToken: TOKEN });
@@ -221,7 +229,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
 
     if (urls.length === 1) {
       const status = await client.sendMessage(chatId, {
-        message: `⚡ <i>Link convert ho raha hai...</i>`, parseMode: 'html',
+        message: `⚡ <i>Link convert ho raha hai...</i>`,
+        parseMode: 'html',
       });
       try {
         const result = await shortenUrl(urls[0], uid);
@@ -286,7 +295,9 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         reportText += `${i + 1}. ${successful[i].short}\n`;
       }
       await client.editMessage(chatId, {
-        message: status.id, text: reportText, parseMode: 'html',
+        message: status.id,
+        text: reportText,
+        parseMode: 'html',
         buttons: keyboard([[{ text: '⬅️ Main Menu', callback_data: 'main_menu' }]]),
       });
     } catch (e) {
@@ -532,5 +543,5 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
   }, new CallbackQuery({}));
 
-  console.log('Bot ready - MayaJaal Converter (Bulk 1000+ fast)');
+  console.log('Bot ready - MayaJaal Converter');
 })();
