@@ -17,20 +17,27 @@ const SUPABASE_URL = (process.env.SUPABASE_URL || '').trim();
 const SUPABASE_KEY = (process.env.SUPABASE_KEY || '').trim();
 const LINK_SECRET = (process.env.LINK_SECRET || 'CHANGE-THIS-NOW-TO-RANDOM-32-CHARS').trim();
 
+// ===== APP LINK CONFIG =====
+const APP_NAME = process.env.APP_NAME || 'MayaJaal';
+const APP_SCHEME = process.env.APP_SCHEME || 'mayajaal';
+const APP_PACKAGE = process.env.APP_PACKAGE || 'com.mayajaal.app';
+const PLAY_STORE_URL = process.env.PLAY_STORE_URL || `https://play.google.com/store/apps/details?id=${APP_PACKAGE}`;
+const APP_STORE_URL = process.env.APP_STORE_URL || 'https://apps.apple.com/app/mayajaal/id000000000';
+
 console.log('=== ENV ===');
 console.log('BOT_TOKEN:', !!TOKEN, '| API_ID:', !!API_ID, '| API_HASH:', !!API_HASH);
 console.log('SUPABASE:', !!SUPABASE_URL, !!SUPABASE_KEY);
-console.log('LINK_SECRET:', LINK_SECRET.length >= 20 ? 'OK (strong)' : 'WEAK — CHANGE NOW!');
+console.log('LINK_SECRET:', LINK_SECRET.length >= 20 ? 'OK' : 'WEAK!');
+console.log('APP:', APP_NAME, '| Package:', APP_PACKAGE);
+
 if (!TOKEN || !API_ID || !API_HASH) throw new Error('Missing credentials');
 if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Missing Supabase config');
-if (LINK_SECRET.length < 20) throw new Error('LINK_SECRET too weak — need 20+ chars');
+if (LINK_SECRET.length < 20) throw new Error('LINK_SECRET too weak');
 
-// ============ HMAC SIGNATURE ============
 function signSlug(slug) {
-  return crypto.createHmac('sha256', LINK_SECRET).update(slug).digest('hex').substring(0, 16);
+  return crypto.createHmac('sha256', LINK_SECRET).update(slug).digest('hex').substring(0, 6);
 }
 
-// ============ SUPABASE REST HELPERS ============
 const SB_HEADERS = {
   'apikey': SUPABASE_KEY,
   'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -42,10 +49,7 @@ async function sbGet(table, query = '') {
   try {
     const r = await axios.get(`${SUPABASE_URL}/rest/v1/${table}${query}`, { headers: SB_HEADERS, timeout: 10000 });
     return r.data || [];
-  } catch (e) {
-    console.error('[SB GET]', e.message);
-    return [];
-  }
+  } catch (e) { console.error('[SB GET]', e.message); return []; }
 }
 
 async function sbUpsert(table, data, conflictCol = 'id') {
@@ -55,22 +59,14 @@ async function sbUpsert(table, data, conflictCol = 'id') {
       timeout: 10000,
     });
     return r.data;
-  } catch (e) {
-    console.error('[SB UPSERT]', e.response ? e.response.data : e.message);
-    return null;
-  }
+  } catch (e) { console.error('[SB UPSERT]', e.response ? e.response.data : e.message); return null; }
 }
 
 async function sbPatch(table, query, data) {
   try {
-    const r = await axios.patch(`${SUPABASE_URL}/rest/v1/${table}${query}`, data, {
-      headers: SB_HEADERS, timeout: 10000,
-    });
+    const r = await axios.patch(`${SUPABASE_URL}/rest/v1/${table}${query}`, data, { headers: SB_HEADERS, timeout: 10000 });
     return r.data;
-  } catch (e) {
-    console.error('[SB PATCH]', e.message);
-    return null;
-  }
+  } catch (e) { console.error('[SB PATCH]', e.message); return null; }
 }
 
 async function getUser(userId) {
@@ -80,12 +76,9 @@ async function getUser(userId) {
 
 async function saveUser(userId, data) {
   const payload = {
-    id: String(userId),
-    username: data.username || 'user',
-    joined: data.joined || Date.now(),
-    balance: data.balance || 0,
-    links_count: data.links_count || 0,
-    clicks: data.clicks || 0,
+    id: String(userId), username: data.username || 'user',
+    joined: data.joined || Date.now(), balance: data.balance || 0,
+    links_count: data.links_count || 0, clicks: data.clicks || 0,
     api_key: data.api_key,
   };
   return sbUpsert('users', payload, 'id');
@@ -93,12 +86,8 @@ async function saveUser(userId, data) {
 
 async function createUser(userId, username) {
   const user = {
-    id: String(userId),
-    username: username || 'user',
-    joined: Date.now(),
-    balance: 0,
-    links_count: 0,
-    clicks: 0,
+    id: String(userId), username: username || 'user', joined: Date.now(),
+    balance: 0, links_count: 0, clicks: 0,
     api_key: crypto.randomBytes(16).toString('hex'),
   };
   await saveUser(userId, user);
@@ -112,11 +101,8 @@ async function getLink(slug) {
 
 async function saveLink(slug, data) {
   const payload = {
-    slug,
-    url: data.url,
-    owner_id: String(data.owner_id),
-    views: data.views || 0,
-    created: data.created || Date.now(),
+    slug, url: data.url, owner_id: String(data.owner_id),
+    views: data.views || 0, created: data.created || Date.now(),
   };
   return sbUpsert('links', payload, 'slug');
 }
@@ -146,7 +132,6 @@ function getDomainName(url) {
   catch (e) { return 'Unknown'; }
 }
 
-// ============ RATE LIMIT ============
 const rateLimitMap = new Map();
 function checkRateLimit(userId, maxPerMin = 60) {
   const now = Date.now();
@@ -162,29 +147,127 @@ setInterval(() => {
   for (const [k, v] of rateLimitMap.entries()) if (now > v.reset) rateLimitMap.delete(k);
 }, 120000);
 
-// ============ SHORTEN ============
 async function shortenUrl(longUrl, ownerId) {
   const slug = crypto.randomBytes(5).toString('hex');
   const sig = signSlug(slug);
-  await saveLink(slug, {
-    url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now(),
+  const combined = slug + sig;
+  await saveLink(slug, { url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now() });
+  return { slug, sig, combined, short: `https://${SHORT_DOMAIN}/${combined}` };
+}// ===== SMART LANDING PAGE HTML =====
+function landingPageHTML(combined, targetUrl, videoId) {
+  const androidIntent = `intent://watch?v=${videoId}#Intent;scheme=${APP_SCHEME};package=${APP_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
+  const iosScheme = `${APP_SCHEME}://watch?v=${videoId}`;
+  
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>${APP_NAME} - Opening...</title>
+<meta property="og:title" content="${APP_NAME} Video">
+<meta property="og:description" content="Watch on ${APP_NAME} app">
+<meta property="og:type" content="video.other">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center}
+.logo{font-size:48px;font-weight:800;background:linear-gradient(135deg,#00ff88,#00b4ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:16px}
+.spinner{width:64px;height:64px;border:4px solid #1a1a1a;border-top-color:#00ff88;border-radius:50%;animation:spin 1s linear infinite;margin:32px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.msg{font-size:16px;color:#888;margin:16px 0}
+.btn{display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#00ff88,#00b4ff);color:#000;text-decoration:none;border-radius:10px;font-weight:700;margin:8px;font-size:15px}
+.btn-secondary{background:#1a1a1a;color:#fff;border:1px solid #333}
+.store-badges{display:flex;gap:12px;justify-content:center;margin-top:20px;flex-wrap:wrap}
+.store-btn{padding:10px 20px;background:#1a1a1a;border-radius:8px;color:#fff;text-decoration:none;font-size:13px;border:1px solid #2a2a2a}
+.actions{margin-top:24px}
+</style>
+</head>
+<body>
+<div class="logo">🎬 ${APP_NAME}</div>
+<div class="spinner"></div>
+<div class="msg" id="msg">Opening in app...</div>
+<div class="actions" id="actions" style="display:none">
+  <a href="${PLAY_STORE_URL}" class="btn">📲 Download App</a>
+  <a href="${targetUrl}" class="btn btn-secondary">🌐 Watch in Browser</a>
+</div>
+<script>
+(function() {
+  var ua = navigator.userAgent || '';
+  var isAndroid = /android/i.test(ua);
+  var isIOS = /iphone|ipad|ipod/i.test(ua);
+  var isMobile = isAndroid || isIOS;
+  var appOpened = false;
+
+  // Detect if app opened (page becomes hidden)
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) appOpened = true;
   });
-  return { slug, sig, short: `https://${SHORT_DOMAIN}/${slug}?s=${sig}` };
+  window.addEventListener('blur', function() { appOpened = true; });
+
+  function showFallback() {
+    if (appOpened) return;
+    document.getElementById('msg').innerHTML = 'App not installed?<br><small style="color:#666">Download to watch faster</small>';
+    document.getElementById('actions').style.display = 'block';
+  }
+
+  if (isAndroid) {
+    // Android: Use intent:// URL - auto-redirects to Play Store if app missing
+    window.location.href = '${androidIntent}';
+    setTimeout(showFallback, 2500);
+  } else if (isIOS) {
+    // iOS: Try custom scheme, fallback to App Store
+    window.location.href = '${iosScheme}';
+    setTimeout(function() {
+      if (!appOpened) window.location.href = '${APP_STORE_URL}';
+      setTimeout(showFallback, 2000);
+    }, 2000);
+  } else {
+    // Desktop - just show options
+    document.getElementById('msg').innerHTML = 'Open this link on mobile to use the app';
+    document.getElementById('actions').style.display = 'block';
+  }
+})();
+</script>
+</body>
+</html>`;
 }
 
-// ============ EXPRESS ============
+// ===== EXPRESS =====
 const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   next();
 });
 
 app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
+// ===== APP VERIFICATION FILES =====
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  res.type('application/json').send(JSON.stringify([{
+    relation: ['delegate_permission/common.handle_all_urls'],
+    target: {
+      namespace: 'android_app',
+      package_name: APP_PACKAGE,
+      sha256_cert_fingerprints: [(process.env.APP_SHA256 || 'REPLACE_WITH_YOUR_SHA256')],
+    },
+  }], null, 2));
+});
+
+app.get('/.well-known/apple-app-site-association', (req, res) => {
+  res.type('application/json').send(JSON.stringify({
+    applinks: {
+      apps: [],
+      details: [{
+        appID: (process.env.APPLE_TEAM_ID || 'TEAMID') + '.' + APP_PACKAGE,
+        paths: ['*'],
+      }],
+    },
+  }, null, 2));
+});
+
+// ===== API =====
 app.post('/api/shorten', async (req, res) => {
   try {
     const apiKey = req.headers['x-api-key'];
@@ -202,20 +285,28 @@ app.post('/api/shorten', async (req, res) => {
   }
 });
 
-app.get('/:slug', async (req, res) => {
-  const slug = req.params.slug;
-  const sig = req.query.s || '';
-  if (slug === 'health') return res.json({ ok: true });
+// ===== SMART LANDING PAGE =====
+app.get('/:combined', async (req, res) => {
+  const combined = req.params.combined;
+  if (combined === 'health') return res.json({ ok: true });
 
-  const expectedSig = signSlug(slug);
-  if (sig !== expectedSig) {
+  if (combined.length !== 16) {
+    return res.status(403).send('Invalid link');
+  }
+
+  const realSlug = combined.substring(0, 10);
+  const providedSig = combined.substring(10, 16);
+  const expectedSig = signSlug(realSlug);
+
+  if (providedSig !== expectedSig) {
     return res.status(403).send('Invalid or tampered link');
   }
 
-  const link = await getLink(slug);
+  const link = await getLink(realSlug);
   if (!link) return res.status(404).send('Link not found');
 
-  await sbPatch('links', `?slug=eq.${encodeURIComponent(slug)}`, { views: (link.views || 0) + 1 });
+  // Track view
+  await sbPatch('links', `?slug=eq.${encodeURIComponent(realSlug)}`, { views: (link.views || 0) + 1 });
   const user = await getUser(link.owner_id);
   if (user) {
     await sbPatch('users', `?id=eq.${encodeURIComponent(user.id)}`, {
@@ -223,10 +314,21 @@ app.get('/:slug', async (req, res) => {
       clicks: (user.clicks || 0) + 1,
     });
   }
-  return res.redirect(link.url);
+
+  // Extract video ID from URL (if it's a mayajaal player link)
+  let videoId = '';
+  try {
+    const m = link.url.match(/\/v\/([a-f0-9]+)/i);
+    if (m) videoId = m[1];
+  } catch (e) {}
+
+  // Serve smart landing page
+  return res.send(landingPageHTML(combined, link.url, videoId));
 });
 
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
+
+// ===== BOT =====
 (async () => {
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
     connectionRetries: 5, autoReconnect: true,
@@ -239,13 +341,8 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     return new Api.ReplyInlineMarkup({
       rows: rows.map(row => new Api.KeyboardButtonRow({
         buttons: row.map(btn => {
-          if (btn.url) {
-            return new Api.KeyboardButtonUrl({ text: btn.text, url: btn.url });
-          }
-          return new Api.KeyboardButtonCallback({
-            text: btn.text,
-            data: Buffer.from(btn.callback_data || ''),
-          });
+          if (btn.url) return new Api.KeyboardButtonUrl({ text: btn.text, url: btn.url });
+          return new Api.KeyboardButtonCallback({ text: btn.text, data: Buffer.from(btn.callback_data || '') });
         }),
       })),
     });
@@ -259,7 +356,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       `✅ Bulk link converter (1000+ links ek saath)\n` +
       `✅ Super fast conversion\n` +
       `✅ Har link ka detailed report\n` +
-      `🔒 <b>Signed links — koi copy nahi kar sakta</b>\n` +
+      `📱 <b>App me direct khulta hai</b>\n` +
       `🛡️ <b>Sabka data safe hai</b>\n\n` +
       `Start karne ke liye neeche diye gaye menu se option select kare ya /start likhe.`;
     const rows = [
@@ -306,32 +403,29 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
 
     if (!checkRateLimit(uid, 60)) {
-      return client.sendMessage(chatId, { message: `⚠️ <b>Rate limit exceeded</b>\n\nAap 1 minute me 60 se zyada links convert nahi kar sakte.`, parseMode: 'html' });
+      return client.sendMessage(chatId, { message: `⚠️ <b>Rate limit exceeded</b>\n\n1 minute me 60 se zyada links convert nahi.`, parseMode: 'html' });
     }
 
     const urls = detectAllUrls(text);
     if (urls.length === 0) return;
 
     if (urls.length === 1) {
-      const status = await client.sendMessage(chatId, {
-        message: `⚡ <i>Link convert ho raha hai...</i>`, parseMode: 'html',
-      });
+      const status = await client.sendMessage(chatId, { message: `⚡ <i>Link convert ho raha hai...</i>`, parseMode: 'html' });
       try {
         const result = await shortenUrl(urls[0], uid);
         await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + 1 });
-        const report = `✅ <b>Link Converted Successfully!</b>\n\n` +
-          `<b>Original Link:</b>\n${escapeHtml(urls[0])}\n\n` +
-          `<b>Signed Short Link:</b>\n${result.short}\n\n` +
-          `📊 <b>Link Details</b>\n` +
+        const report = `✅ <b>Link Converted!</b>\n\n` +
+          `<b>Original:</b>\n${escapeHtml(urls[0])}\n\n` +
+          `<b>Smart Link:</b>\n${result.short}\n\n` +
+          `📊 <b>Details</b>\n` +
           `👤 <b>Type:</b> ${getDomainName(urls[0])}\n` +
           `🟢 <b>Status:</b> Active\n` +
-          `🔒 <b>Signature:</b> <code>${result.sig}</code>\n` +
+          `📱 <b>App:</b> Direct open / Download page\n` +
           `📅 <b>Created:</b> ${new Date().toLocaleString()}\n` +
-          `♾️ <b>Valid For:</b> Permanent\n\n` +
-          `⚠️ <i>Ye signed link sirf isi form me kaam karega.</i>`;
+          `♾️ <b>Valid:</b> Permanent`;
         const rows = [
           [{ text: '🔗 Open Link', url: result.short }],
-          [{ text: '📋 Copy Full Link', callback_data: 'copy_' + result.slug }],
+          [{ text: '📋 Copy Link', callback_data: 'copy_' + result.slug }],
           [{ text: '⬅️ Main Menu', callback_data: 'main_menu' }],
         ];
         await client.editMessage(chatId, { message: status.id, text: report, parseMode: 'html', buttons: keyboard(rows) });
@@ -342,8 +436,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
 
     const status = await client.sendMessage(chatId, {
-      message: `⏳ <b>Processing Your Links...</b>\n\nKripya thoda intezar karein.\nAapke ${urls.length} links convert ho rahe hain.`,
-      parseMode: 'html',
+      message: `⏳ <b>Processing ${urls.length} links...</b>`, parseMode: 'html',
     });
 
     const startTime = Date.now();
@@ -356,33 +449,19 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
           batch.map(url => shortenUrl(url, uid).then(r => ({ original: url, ...r })).catch(e => ({ original: url, error: e.message })))
         );
         results.push(...batchResults);
-        if (i + CONCURRENCY < urls.length) {
-          try {
-            await client.editMessage(chatId, {
-              message: status.id,
-              text: `⏳ <b>Processing...</b>\n\n✅ ${results.length} / ${urls.length} converted`,
-              parseMode: 'html',
-            });
-          } catch (e) {}
-        }
       }
       const successful = results.filter(r => !r.error);
       await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + successful.length });
       const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
       let reportText = `✅ <b>Conversion Complete!</b>\n\n` +
-        `📊 <b>Total:</b> ${urls.length} links\n` +
-        `✅ <b>Converted:</b> ${successful.length}\n` +
-        `❌ <b>Failed:</b> ${results.length - successful.length}\n` +
-        `⏱️ <b>Time:</b> ${timeTaken}s\n\n` +
-        `🔒 <b>All links are HMAC-signed</b>\n\n` +
-        `📋 <b>Sample Links (First 5):</b>\n`;
+        `📊 Total: ${urls.length}\n` +
+        `✅ Converted: ${successful.length}\n` +
+        `⏱️ Time: ${timeTaken}s\n\n` +
+        `📋 <b>Sample:</b>\n`;
       for (let i = 0; i < Math.min(5, successful.length); i++) {
         reportText += `${i + 1}. ${successful[i].short}\n`;
       }
-      await client.editMessage(chatId, {
-        message: status.id, text: reportText, parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Main Menu', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: status.id, text: reportText, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Main Menu', callback_data: 'main_menu' }]]) });
     } catch (e) {
       await client.editMessage(chatId, { message: status.id, text: `❌ ${escapeHtml(e.message)}` });
     }
@@ -401,233 +480,88 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     if (!user) user = await createUser(uid, 'user');
 
     if (data === 'menu_convert') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `🔗 <b>Convert Link</b>\n\nMayaJaal.online ka link bhejo, main use signed short link me convert kar dunga.\n\n🔒 <b>Security:</b>\nHar link me HMAC signature hoti hai. Koi bhi ise copy karke ya modify karke kaam nahi kar sakta.\n\n<b>Example:</b>\nhttps://example.com/abc\nhttps://amazon.in/123`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `🔗 <b>Convert Link</b>\n\nLink bhejo, main smart short link bana dunga.\n\n📱 <b>App installed:</b> Direct app khulega\n📲 <b>App nahi hai:</b> Download page khulega\n\n<b>Example:</b>\nhttps://example.com/abc`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_bulk') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `🗂 <b>Bulk Link Converter</b>\n\nEk baar me <b>1000+ links</b> convert karein — <b>Super Fast!</b>\n\n<b>Steps:</b>\n1. Links ko text format me bhejein\n2. Ek line me ek link\n3. 1000+ links supported\n4. Kuch hi second me sab convert\n\n<b>Max:</b> 1000+\n<b>Speed:</b> ~50 links/second\n<b>Rate Limit:</b> 60 links/minute\n\n🔒 <b>All links are signed & secure</b>\n\n<b>Sample Format:</b>\nhttps://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123`,
-        parseMode: 'html',
-        buttons: keyboard([
-          [{ text: '📥 Copy Sample Format', callback_data: 'copy_sample' }],
-          [{ text: '⬅️ Back', callback_data: 'main_menu' }],
-        ]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `🗂 <b>Bulk Link Converter</b>\n\n1000+ links ek saath — Super Fast!\n\n<b>Steps:</b>\n1. Ek line me ek link\n2. 1000+ links supported\n3. Kuch second me convert\n\n<b>Rate Limit:</b> 60/min\n\n<b>Sample:</b>\nhttps://example.com/abc\nhttps://youtube.com/watch?v=xyz`, parseMode: 'html', buttons: keyboard([[{ text: '📥 Sample', callback_data: 'copy_sample' }], [{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_income') {
       const balance = parseFloat(user.balance || 0).toFixed(2);
-      const clicks = user.clicks || 0;
-      const links = user.links_count || 0;
-      const today = (parseFloat(balance) * 0.08).toFixed(2);
-      const week = (parseFloat(balance) * 0.35).toFixed(2);
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `💰 <b>Your Income</b>\n\n` +
-          `<b>Total Earnings:</b> ₹${balance}\n` +
-          `<b>Total Clicks:</b> ${clicks}\n` +
-          `<b>Total Links:</b> ${links}\n\n` +
-          `📅 <b>Today:</b> ₹${today}\n` +
-          `📅 <b>This Week:</b> ₹${week}\n` +
-          `📅 <b>This Month:</b> ₹${balance}\n\n` +
-          `💡 <i>Per click ₹0.05 milta hai.</i>`,
-        parseMode: 'html',
-        buttons: keyboard([
-          [{ text: '💸 Withdraw / Payout', callback_data: 'withdraw' }],
-          [{ text: '📊 View Transfer', callback_data: 'menu_transfer' }],
-          [{ text: '⬅️ Back', callback_data: 'main_menu' }],
-        ]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `💰 <b>Your Income</b>\n\n<b>Total Earnings:</b> ₹${balance}\n<b>Clicks:</b> ${user.clicks || 0}\n<b>Links:</b> ${user.links_count || 0}\n\n💡 Per click ₹0.05`, parseMode: 'html', buttons: keyboard([[{ text: '💸 Withdraw', callback_data: 'withdraw' }], [{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_transfer') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `📊 <b>View Transfer</b>\n\nAap apne transfer ka pura record yahan dekh sakte hain.\n\n` +
-          `<b>Recent Transfers:</b>\n` +
-          `<i>Abhi koi transfer nahi hai.</i>\n\n` +
-          `Total: ${user.links_count || 0} links\n` +
-          `Balance: ₹${parseFloat(user.balance || 0).toFixed(2)}`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `📊 <b>View Transfer</b>\n\nAbhi koi transfer nahi hai.\n\nTotal: ${user.links_count || 0} links\nBalance: ₹${parseFloat(user.balance || 0).toFixed(2)}`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_allbots') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `🤖 <b>All Bots</b>\n\nHamare sabhi bots ka ek hi jagah se access karein.\n\n` +
-          `🔗 <b>Link Converter Bot</b> (Active)\n` +
-          `💰 <b>Earning Bot</b> (Active)\n` +
-          `📝 <b>Content Bot</b> (Active)\n` +
-          `🎬 <b>Video Bot</b> (Active)\n` +
-          `🌐 <b>Web Bot</b> (Active)\n\n` +
-          `<i>Sabka data safe hai 🔒</i>`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `🤖 <b>All Bots</b>\n\n🔗 Link Converter (Active)\n💰 Earning Bot (Active)\n📝 Content Bot (Active)\n🎬 Video Bot (Active)\n🌐 Web Bot (Active)\n\n<i>Sabka data safe 🔒</i>`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_api') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `🔌 <b>API Connect</b>\n\nApna API key generate karein aur apni website, app ya bot me easy integration karein.\n\n` +
-          `<b>API Features:</b>\n` +
-          `✅ Fast & Reliable\n` +
-          `✅ 1000+ Links Support\n` +
-          `✅ Full Documentation\n` +
-          `✅ Example Code (Python, Node.js, PHP)\n` +
-          `🔒 HMAC Signed Links\n\n` +
-          `<b>Your API Key:</b>\n<code>${user.api_key}</code>`,
-        parseMode: 'html',
-        buttons: keyboard([
-          [{ text: '📖 API Docs', callback_data: 'api_docs' }],
-          [{ text: '🔄 Reset API Key', callback_data: 'reset_api' }],
-          [{ text: '⬅️ Back', callback_data: 'main_menu' }],
-        ]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `🔌 <b>API Connect</b>\n\n<b>Your API Key:</b>\n<code>${user.api_key}</code>`, parseMode: 'html', buttons: keyboard([[{ text: '📖 API Docs', callback_data: 'api_docs' }], [{ text: '🔄 Reset', callback_data: 'reset_api' }], [{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_account') {
-      const joined = new Date(user.joined).toLocaleDateString();
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `👤 <b>Account & Settings</b>\n\n` +
-          `<b>Username:</b> @${user.username}\n` +
-          `<b>User ID:</b> ${user.id}\n` +
-          `<b>Joined:</b> ${joined}\n` +
-          `<b>Total Links:</b> ${user.links_count || 0}\n` +
-          `<b>Total Clicks:</b> ${user.clicks || 0}\n` +
-          `<b>Balance:</b> ₹${parseFloat(user.balance || 0).toFixed(2)}`,
-        parseMode: 'html',
-        buttons: keyboard([
-          [{ text: '🔄 Reset API Key', callback_data: 'reset_api' }],
-          [{ text: '🤖 All Bots', callback_data: 'menu_allbots' }],
-          [{ text: '🛡️ Privacy & Security', callback_data: 'privacy' }],
-          [{ text: '⬅️ Back', callback_data: 'main_menu' }],
-        ]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `👤 <b>Account</b>\n\n<b>Username:</b> @${user.username}\n<b>User ID:</b> ${user.id}\n<b>Links:</b> ${user.links_count || 0}\n<b>Clicks:</b> ${user.clicks || 0}\n<b>Balance:</b> ₹${parseFloat(user.balance || 0).toFixed(2)}`, parseMode: 'html', buttons: keyboard([[{ text: '🔄 Reset API', callback_data: 'reset_api' }], [{ text: '🛡️ Privacy', callback_data: 'privacy' }], [{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'menu_logout') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `🚪 <b>Logout</b>\n\nKya aap logout karna chahte hain?\n\n` +
-          `Aapka data safe rahega.\n\n` +
-          `🛡️ <b>Sabka data safe hai</b>\n` +
-          `Hum aapke personal data, links, income aur transfer details ko secure rakhte hain.`,
-        parseMode: 'html',
-        buttons: keyboard([
-          [{ text: '✅ Confirm Logout', callback_data: 'confirm_logout' }],
-          [{ text: '❌ Cancel', callback_data: 'main_menu' }],
-        ]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `🚪 <b>Logout</b>\n\nConfirm?`, parseMode: 'html', buttons: keyboard([[{ text: '✅ Confirm', callback_data: 'confirm_logout' }], [{ text: '❌ Cancel', callback_data: 'main_menu' }]]) });
       return;
     }
 
-    if (data === 'main_menu') {
-      await sendMenu(chatId, msgId);
-      return;
-    }
+    if (data === 'main_menu') { await sendMenu(chatId, msgId); return; }
 
     if (data === 'reset_api') {
       const newKey = crypto.randomBytes(16).toString('hex');
       await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: newKey });
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `✅ <b>API Key Reset!</b>\n\n<b>New Key:</b>\n<code>${newKey}</code>\n\n<i>Purani key ab kaam nahi karegi.</i>`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `✅ <b>API Reset!</b>\n\n<code>${newKey}</code>`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'privacy') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `🛡️ <b>Privacy & Security</b>\n\n` +
-          `Hum aapke sabhi personal data ko safely store karte hain. Koi bhi third-party aapka data access nahi kar sakti.\n\n` +
-          `✅ Encrypted storage\n` +
-          `✅ HMAC signed links (koi copy nahi kar sakta)\n` +
-          `✅ No data sharing\n` +
-          `✅ Safe & Secure\n` +
-          `✅ 24/7 protection`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `🛡️ <b>Privacy</b>\n\n✅ Encrypted storage\n✅ HMAC signed links\n✅ No data sharing\n✅ Safe & Secure`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'api_docs') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `📖 <b>API Documentation</b>\n\n` +
-          `<b>Endpoint:</b>\n<code>POST https://${SHORT_DOMAIN}/api/shorten</code>\n\n` +
-          `<b>Headers:</b>\n<code>x-api-key: ${user.api_key}</code>\n` +
-          `<code>Content-Type: application/json</code>\n\n` +
-          `<b>Body:</b>\n<code>{"url": "https://example.com"}</code>\n\n` +
-          `<b>Response:</b>\n<code>{"success": true, "short": "https://${SHORT_DOMAIN}/abc123?s=xxx"}</code>\n\n` +
-          `⚠️ <i>Signed links — response ka <code>short</code> directly use karo.</i>`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `📖 <b>API Docs</b>\n\n<b>POST</b> https://${SHORT_DOMAIN}/api/shorten\n\n<b>Headers:</b>\n<code>x-api-key: ${user.api_key}</code>\n\n<b>Body:</b>\n<code>{"url":"https://example.com"}</code>`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'confirm_logout') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `✅ <b>Logout successful.</b>\n\nDobara start karne ke liye /start bhejein.`,
-        parseMode: 'html',
-      });
+      await client.editMessage(chatId, { message: msgId, text: `✅ Logout successful. /start bhejein.`, parseMode: 'html' });
       return;
     }
 
     if (data === 'withdraw') {
-      await client.editMessage(chatId, {
-        message: msgId,
-        text: `💸 <b>Withdraw / Payout Info</b>\n\n` +
-          `<b>Minimum withdrawal:</b> ₹500\n\n` +
-          `<b>Methods:</b>\n• UPI\n• Paytm\n• Bank Transfer\n\n` +
-          `Aapka current balance: <b>₹${parseFloat(user.balance || 0).toFixed(2)}</b>`,
-        parseMode: 'html',
-        buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]),
-      });
+      await client.editMessage(chatId, { message: msgId, text: `💸 <b>Withdraw</b>\n\nMinimum: ₹500\n\nMethods: UPI, Paytm, Bank\n\nBalance: ₹${parseFloat(user.balance || 0).toFixed(2)}`, parseMode: 'html', buttons: keyboard([[{ text: '⬅️ Back', callback_data: 'main_menu' }]]) });
       return;
     }
 
     if (data === 'copy_sample') {
-      await client.sendMessage(chatId, {
-        message: `<b>Sample Format:</b>\n<code>https://example.com/abc\nhttps://youtube.com/watch?v=xyz\nhttps://tiktok.com/123</code>`,
-        parseMode: 'html',
-      });
+      await client.sendMessage(chatId, { message: `<b>Sample:</b>\n<code>https://example.com/abc\nhttps://youtube.com/watch?v=xyz</code>`, parseMode: 'html' });
       return;
     }
 
     if (data.startsWith('copy_')) {
       const slug = data.replace('copy_', '');
       const sig = signSlug(slug);
-      const link = `https://${SHORT_DOMAIN}/${slug}?s=${sig}`;
-      await client.sendMessage(chatId, {
-        message: `📋 <b>Signed Short Link:</b>\n<code>${link}</code>\n\n🔒 <i>Signature ke bina link kaam nahi karega.</i>`,
-        parseMode: 'html',
-      });
+      const link = `https://${SHORT_DOMAIN}/${slug}${sig}`;
+      await client.sendMessage(chatId, { message: `📋 <b>Link:</b>\n<code>${link}</code>`, parseMode: 'html' });
       return;
     }
   }, new CallbackQuery({}));
 
-  console.log('Bot ready - MayaJaal Converter (Supabase + HMAC Signed)');
+  console.log('Bot ready - MayaJaal Converter (Smart App Links)');
 })();
