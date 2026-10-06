@@ -6,6 +6,7 @@ const { NewMessage } = require('telegram/events');
 const { CallbackQuery } = require('telegram/events/CallbackQuery');
 const axios = require('axios');
 const crypto = require('crypto');
+const { getCentralConfig } = require('./config'); // <-- YEH NAYI LINE HAI
 
 const TOKEN = (process.env.BOT_TOKEN || '').trim();
 const API_ID = parseInt(process.env.TELEGRAM_API_ID || '0', 10);
@@ -153,7 +154,9 @@ async function shortenUrl(longUrl, ownerId) {
   const combined = slug + sig;
   await saveLink(slug, { url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now() });
   return { slug, sig, combined, short: `https://${SHORT_DOMAIN}/${combined}` };
-}// ===== SMART LANDING PAGE HTML =====
+}
+
+// ===== SMART LANDING PAGE HTML =====
 function landingPageHTML(combined, targetUrl, videoId) {
   const androidIntent = `intent://watch?v=${videoId}#Intent;scheme=${APP_SCHEME};package=${APP_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
   const iosScheme = `${APP_SCHEME}://watch?v=${videoId}`;
@@ -197,7 +200,6 @@ body{background:#0a0a0a;color:#fff;font-family:-apple-system,BlinkMacSystemFont,
   var isMobile = isAndroid || isIOS;
   var appOpened = false;
 
-  // Detect if app opened (page becomes hidden)
   document.addEventListener('visibilitychange', function() {
     if (document.hidden) appOpened = true;
   });
@@ -210,18 +212,15 @@ body{background:#0a0a0a;color:#fff;font-family:-apple-system,BlinkMacSystemFont,
   }
 
   if (isAndroid) {
-    // Android: Use intent:// URL - auto-redirects to Play Store if app missing
     window.location.href = '${androidIntent}';
     setTimeout(showFallback, 2500);
   } else if (isIOS) {
-    // iOS: Try custom scheme, fallback to App Store
     window.location.href = '${iosScheme}';
     setTimeout(function() {
       if (!appOpened) window.location.href = '${APP_STORE_URL}';
       setTimeout(showFallback, 2000);
     }, 2000);
   } else {
-    // Desktop - just show options
     document.getElementById('msg').innerHTML = 'Open this link on mobile to use the app';
     document.getElementById('actions').style.display = 'block';
   }
@@ -305,7 +304,6 @@ app.get('/:combined', async (req, res) => {
   const link = await getLink(realSlug);
   if (!link) return res.status(404).send('Link not found');
 
-  // Track view
   await sbPatch('links', `?slug=eq.${encodeURIComponent(realSlug)}`, { views: (link.views || 0) + 1 });
   const user = await getUser(link.owner_id);
   if (user) {
@@ -315,21 +313,40 @@ app.get('/:combined', async (req, res) => {
     });
   }
 
-  // Extract video ID from URL (if it's a mayajaal player link)
   let videoId = '';
   try {
     const m = link.url.match(/\/v\/([a-f0-9]+)/i);
     if (m) videoId = m[1];
   } catch (e) {}
 
-  // Serve smart landing page
   return res.send(landingPageHTML(combined, link.url, videoId));
 });
 
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
+// ============================================================
+// BOT
+// ============================================================
 
-// ===== BOT =====
+// 🔽 YEH NAYA FUNCTION HAI API CONNECT HONE KA WAIT KAREGA 🔽
+async function waitForApiConnection() {
+  console.log('[BOT] Waiting for central API connection...');
+  while (true) {
+    const cfg = await getCentralConfig();
+    if (cfg && cfg.api_connected === true) {
+      console.log('[BOT] ✅ Central API Connected:', cfg.api_base);
+      return cfg;
+    }
+    console.log('[BOT] ⏳ Not connected yet. Retrying in 10s...');
+    await new Promise(r => setTimeout(r, 10000));
+  }
+}
+// 🔼 YEH NAYA FUNCTION HAI 🔼
+
 (async () => {
+  // 🔽 YEH NAYI LINE HAI 🔽
+  await waitForApiConnection();
+  // 🔼 YEH NAYI LINE HAI 🔼
+
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
     connectionRetries: 5, autoReconnect: true,
   });
