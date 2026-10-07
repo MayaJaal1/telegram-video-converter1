@@ -522,7 +522,9 @@ async function waitForApiConnection() {
     const lang = await getUserLang(uid);
     let user = await getUser(uid);
     if (!user) { const sender = await msg.getSender(); user = await createUser(uid, sender?.username || 'user'); }
-
+    const sessionData = await getUserKeySynced(uid);
+    if (!sessionData) { await client.sendMessage(chatId, { message: t(lang, 'not_logged_in'), parseMode: 'html' }); return; }
+    if (!checkRateLimit(uid, 60)) { ... }
     // 🌟 NEW: Cross-bot session check (login required to convert links)
     const sessionData = await getUserKeySynced(uid);
     if (!sessionData) {
