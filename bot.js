@@ -38,6 +38,7 @@ if (!TOKEN || !API_ID || !API_HASH) throw new Error('Missing credentials');
 if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Missing Supabase config');
 if (LINK_SECRET.length < 20) throw new Error('LINK_SECRET too weak');
 
+// ===== TRANSLATIONS =====
 const T = {
   en: {
     welcome: '👋 <b>Welcome to MayaJaal.online</b>\n<i>Link Shortener • Convert • Earn</i>\n\n✅ Convert links\n✅ Bulk converter (1000+ links)\n✅ Fast & Secure',
@@ -115,7 +116,7 @@ const T = {
     choose_language: '🌐 <b>Choose Language / भाषा चुनें</b>',
     current_language: 'वर्तमान भाषा',
     settings_title: '⚙️ <b>सेटिंग्स</b>',
-    not_logged_in: '❌ <b>आप लॉग इन नहीं हैं।</b>\n\nकृपया पहले /api <YOUR_KEY> भेजें।\nAPI कनेक्ट मेन्यू से अपनी की लें।'
+    not_logged_in: '❌ <b>आप लॉग इन नहीं हैं।</b>\n\nकृपया पहले /api <YOUR_KEY> भेजें。\nAPI कनेक्ट मेन्यू से अपनी की लें।'
   }
 };
 
@@ -140,16 +141,8 @@ async function saveUserLang(tgId, lang) {
 
 function signSlug(slug) {
   return crypto.createHmac('sha256', LINK_SECRET).update(slug).digest('hex').substring(0, 6);
-}
-
-const SB_HEADERS = {
-  'apikey': SUPABASE_KEY,
-  'Authorization': `Bearer ${SUPABASE_KEY}`,
-  'Content-Type': 'application/json',
-  'Prefer': 'return=representation',
-};
-
-async function sbGet(table, query = '') {
+    }
+    async function sbGet(table, query = '') {
   try {
     const r = await axios.get(`${SUPABASE_URL}/rest/v1/${table}${query}`, { headers: SB_HEADERS, timeout: 10000 });
     return r.data || [];
@@ -190,6 +183,7 @@ async function redisGetUserKey(tgId) {
   } catch (e) { return null; }
 }
 
+// ===== 🌟 CROSS-BOT SESSION HELPERS =====
 async function getUserKeySynced(telegramId) {
   const local = await redisGetUserKey(telegramId);
   if (local && local.apiKey) return local;
@@ -208,6 +202,7 @@ async function setUserLogin(telegramId, status, apiKey = null) {
   if (apiKey !== null) updates.api_key = apiKey;
   await sbPatch('users', `?id=eq.${encodeURIComponent(String(telegramId))}`, updates);
 }
+// ===== END NEW =====
 
 async function getUser(userId) {
   const rows = await sbGet('users', `?id=eq.${encodeURIComponent(userId)}&limit=1`);
@@ -245,6 +240,7 @@ async function saveLink(slug, data) {
   };
   return sbUpsert('links', payload, 'slug');
 }
+
 function escapeHtml(s = '') {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -264,8 +260,7 @@ function detectAllUrls(text) {
   }
   return unique;
 }
-
-const rateLimitMap = new Map();
+  const rateLimitMap = new Map();
 function checkRateLimit(userId, maxPerMin = 60) {
   const now = Date.now();
   const key = String(userId);
@@ -287,7 +282,6 @@ async function shortenUrl(longUrl, ownerId) {
   await saveLink(slug, { url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now() });
   return { slug, sig, combined, short: `https://${SHORT_DOMAIN}/${combined}` };
 }
-
 function landingPageHTML(combined, targetUrl, videoId) {
   const androidIntent = `intent://watch?v=${videoId}#Intent;scheme=${APP_SCHEME};package=${APP_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
   const iosScheme = `${APP_SCHEME}://watch?v=${videoId}`;
@@ -359,6 +353,26 @@ app.use((req, res, next) => {
 
 app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  res.type('application/json').send(JSON.stringify([{
+    relation: ['delegate_permission/common.handle_all_urls'],
+    target: {
+      namespace: 'android_app',
+      package_name: APP_PACKAGE,
+      sha256_cert_fingerprints: [(process.env.APP_SHA256 || 'REPLACE_WITH_YOUR_SHA256')],
+    },
+  }], null, 2));
+});
+
+app.get('/.well-known/apple-app-site-association', (req, res) => {
+  res.type('application/json').send(JSON.stringify({
+    applinks: {
+      apps: [],
+      details: [{ appID: (process.env.APPLE_TEAM_ID || 'TEAMID') + '.' + APP_PACKAGE, paths: ['*'] }],
+    },
+  }, null, 2));
+});
+
 app.post('/api/shorten', async (req, res) => {
   try {
     const apiKey = req.headers['x-api-key'];
@@ -398,8 +412,7 @@ app.get('/:combined', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
-                         
-async function waitForApiConnection() {
+          async function waitForApiConnection() {
   console.log('[BOT] Waiting for central API connection...');
   while (true) {
     const cfg = await getCentralConfig();
@@ -411,7 +424,6 @@ async function waitForApiConnection() {
     await new Promise(r => setTimeout(r, 10000));
   }
 }
-
 (async () => {
   await waitForApiConnection();
 
@@ -448,7 +460,8 @@ async function waitForApiConnection() {
     }
     await client.sendMessage(chatId, { message: text, parseMode: 'html', buttons: keyboard(rows) });
   }
-    client.addEventHandler(async (event) => {
+
+  client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
     const text = (msg.message || '').trim();
@@ -468,7 +481,7 @@ async function waitForApiConnection() {
       if (key.length < 12) { await client.sendMessage(chatId, { message: t(lang, 'invalid_key'), parseMode: 'html' }); return; }
       await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: key });
       await redisSaveUserKey(uid, key);
-      await setUserLogin(uid, true, key);
+      await setUserLogin(uid, true, key); // 🌟 Sync to Supabase for cross-bot login
       await client.sendMessage(chatId, { message: t(lang, 'api_connected'), parseMode: 'html' });
       return;
     }
@@ -477,7 +490,7 @@ async function waitForApiConnection() {
       const lang = await getUserLang(uid);
       await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: '' });
       await redisDeleteUserKey(uid);
-      await setUserLogin(uid, false, '');
+      await setUserLogin(uid, false, ''); // 🌟 Sync logout to Supabase
       await client.sendMessage(chatId, { message: t(lang, 'logout_success'), parseMode: 'html' });
       return;
     }
@@ -493,11 +506,15 @@ async function waitForApiConnection() {
     const lang = await getUserLang(uid);
     let user = await getUser(uid);
     if (!user) { const sender = await msg.getSender(); user = await createUser(uid, sender?.username || 'user'); }
-    
+
+    // 🌟 Cross-bot session check (login required to convert links)
     const sessionData = await getUserKeySynced(uid);
-    if (!sessionData) { await client.sendMessage(chatId, { message: t(lang, 'not_logged_in'), parseMode: 'html' }); return; }
-    if (!checkRateLimit(uid, 60)) { await client.sendMessage(chatId, { message: t(lang, 'rate_limit'), parseMode: 'html' }); return; }
-    
+    if (!sessionData) {
+      await client.sendMessage(chatId, { message: t(lang, 'not_logged_in'), parseMode: 'html' });
+      return;
+    }
+
+    if (!checkRateLimit(uid, 60)) { return client.sendMessage(chatId, { message: t(lang, 'rate_limit'), parseMode: 'html' }); }
     const urls = detectAllUrls(text);
     if (urls.length === 0) return;
 
@@ -600,7 +617,7 @@ async function waitForApiConnection() {
     if (data === 'confirm_logout') {
       await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: '' });
       await redisDeleteUserKey(uid);
-      await setUserLogin(uid, false, '');
+      await setUserLogin(uid, false, ''); // 🌟 Sync logout to Supabase
       await client.editMessage(chatId, { message: msgId, text: t(lang, 'logout_success'), parseMode: 'html' });
       return;
     }
@@ -615,4 +632,4 @@ async function waitForApiConnection() {
 
   console.log('Bot ready - MayaJaal Converter (Hindi/English)');
 })();
-        
+                                         
