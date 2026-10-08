@@ -577,6 +577,21 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     }
     if (data === 'menu_income') {
       const balance = parseFloat(user.balance || 0).toFixed(2);
+      const text = `📊 <b>Aapki Income aur Views Report:</b>\n\n` +
+                   `💰 <b>Earnings:</b> ₹${balance}\n` +
+                   `👀 <b>Total Views/Clicks:</b> ${user.clicks || 0}\n` +
+                   `🔗 <b>Total Links Generated:</b> ${user.links_count || 0}`;
+      
+      await client.editMessage(chatId, { 
+        message: msgId, 
+        text: text, 
+        parseMode: 'html', 
+        buttons: keyboard([[{ text: '« Back', callback_data: 'main_menu' }]]) 
+      });
+      return;
+    }
+    if (data === 'menu_income') {
+      const balance = parseFloat(user.balance || 0).toFixed(2);
       await client.editMessage(chatId, { message: msgId, text: `${t(lang, 'your_income')}\n\n<b>${t(lang, 'earnings')}:</b> ₹${balance}\n<b>${t(lang, 'clicks')}:</b> ${user.clicks || 0}\n<b>${t(lang, 'links')}:</b> ${user.links_count || 0}`, parseMode: 'html', buttons: keyboard([[{ text: t(lang, 'back'), callback_data: 'main_menu' }]]) });
       return;
     }
