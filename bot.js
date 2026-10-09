@@ -7,7 +7,29 @@ const { CallbackQuery } = require('telegram/events/CallbackQuery');
 const axios = require('axios');
 const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
-const { getCentralConfig } = require('./config');
+const admin = require('firebase-admin');
+
+// ===== 🌟 FIREBASE ADMIN INITIALIZATION =====
+try {
+  if (!admin.apps.length) {
+    if (process.env.FIREBASE_PROJECT_ID) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
+        })
+      });
+    } else {
+      admin.initializeApp();
+    }
+    console.log('Firebase Admin initialized successfully');
+  }
+} catch (e) {
+  console.error('[Firebase Init Error]', e.message);
+}
+
+const db = admin.firestore();
 
 let redis;
 try { redis = Redis.fromEnv(); console.log('Redis connected'); } catch (e) { console.log('Redis not available'); redis = null; }
@@ -18,8 +40,6 @@ const API_HASH = (process.env.TELEGRAM_API_HASH || '').trim();
 const SHORT_DOMAIN = (process.env.SHORT_DOMAIN || 'm.mayajaal.online').trim();
 const BASE_URL = (process.env.BASE_URL || 'https://mayajaal.online').trim();
 const PORT = parseInt(process.env.PORT || '8090', 10);
-const SUPABASE_URL = (process.env.SUPABASE_URL || '').trim();
-const SUPABASE_KEY = (process.env.SUPABASE_KEY || '').trim();
 const LINK_SECRET = (process.env.LINK_SECRET || 'CHANGE-THIS-NOW-TO-RANDOM-32-CHARS').trim();
 
 const APP_NAME = process.env.APP_NAME || 'MayaJaal';
@@ -30,12 +50,10 @@ const APP_STORE_URL = process.env.APP_STORE_URL || 'https://apps.apple.com/app/m
 
 console.log('=== ENV ===');
 console.log('BOT_TOKEN:', !!TOKEN, '| API_ID:', !!API_ID, '| API_HASH:', !!API_HASH);
-console.log('SUPABASE:', !!SUPABASE_URL, !!SUPABASE_KEY);
 console.log('LINK_SECRET:', LINK_SECRET.length >= 20 ? 'OK' : 'WEAK!');
 console.log('APP:', APP_NAME);
 
 if (!TOKEN || !API_ID || !API_HASH) throw new Error('Missing credentials');
-if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Missing Supabase config');
 if (LINK_SECRET.length < 20) throw new Error('LINK_SECRET too weak');
 
 // ===== TRANSLATIONS =====
@@ -141,29 +159,71 @@ async function saveUserLang(tgId, lang) {
 
 function signSlug(slug) {
   return crypto.createHmac('sha256', LINK_SECRET).update(slug).digest('hex').substring(0, 6);
-    }
-    async function sbGet(table, query = '') {
+}
+// ===== 🌟 FIREBASE DATABASE HELPERS =====
+async function getUser(userId) {
   try {
-    const r = await axios.get(`${SUPABASE_URL}/rest/v1/${table}${query}`, { headers: SB_HEADERS, timeout: 10000 });
-    return r.data || [];
-  } catch (e) { console.error('[SB GET]', e.message); return []; }
+    const doc = await db.collection('users').doc(String(userId)).get();
+    return doc.exists ? { id: doc.id, ...doc.data() } : null;
+  } catch (e) { console.error('[FB GET USER]', e.message); return null; }
 }
 
-async function sbUpsert(table, data, conflictCol = 'id') {
+async function saveUser(userId, data) {
   try {
-    const r = await axios.post(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflictCol}`, data, {
-      headers: { ...SB_HEADERS, 'Prefer': 'resolution=merge-duplicates,return=representation' },
-      timeout: 10000,
-    });
-    return r.data;
-  } catch (e) { console.error('[SB UPSERT]', e.response ? e.response.data : e.message); return null; }
+    const payload = {
+      username: data.username || 'user',
+      joined: data.joined || Date.now(),
+      balance: data.balance || 0,
+      links_count: data.links_count || 0,
+      clicks: data.clicks || 0,
+      api_key: data.api_key || crypto.randomBytes(16).toString('hex'),
+      is_logged_in: data.is_logged_in !== undefined ? data.is_logged_in : true,
+    };
+    await db.collection('users').doc(String(userId)).set(payload, { merge: true });
+    return { id: String(userId), ...payload };
+  } catch (e) { console.error('[FB SAVE USER]', e.message); return null; }
 }
 
-async function sbPatch(table, query, data) {
+async function updateUser(userId, updates) {
   try {
-    const r = await axios.patch(`${SUPABASE_URL}/rest/v1/${table}${query}`, data, { headers: SB_HEADERS, timeout: 10000 });
-    return r.data;
-  } catch (e) { console.error('[SB PATCH]', e.message); return null; }
+    await db.collection('users').doc(String(userId)).set(updates, { merge: true });
+  } catch (e) { console.error('[FB UPDATE USER]', e.message); }
+}
+
+async function getUserByApiKey(apiKey) {
+  try {
+    const snapshot = await db.collection('users').where('api_key', '==', apiKey).limit(1).get();
+    if (snapshot.empty) return null;
+    const doc = snapshot.docs[0];
+    return { id: doc.id, ...doc.data() };
+  } catch (e) { console.error('[FB GET USER BY API]', e.message); return null; }
+}
+
+async function getLink(slug) {
+  try {
+    const doc = await db.collection('links').doc(slug).get();
+    return doc.exists ? doc.data() : null;
+  } catch (e) { console.error('[FB GET LINK]', e.message); return null; }
+}
+
+async function saveLink(slug, data) {
+  try {
+    const payload = {
+      slug,
+      url: data.url,
+      owner_id: String(data.owner_id),
+      views: data.views || 0,
+      created: data.created || Date.now(),
+    };
+    await db.collection('links').doc(slug).set(payload, { merge: true });
+    return payload;
+  } catch (e) { console.error('[FB SAVE LINK]', e.message); return null; }
+}
+
+async function updateLink(slug, updates) {
+  try {
+    await db.collection('links').doc(slug).set(updates, { merge: true });
+  } catch (e) { console.error('[FB UPDATE LINK]', e.message); }
 }
 
 async function redisSaveUserKey(tgId, key) {
@@ -188,11 +248,10 @@ async function getUserKeySynced(telegramId) {
   const local = await redisGetUserKey(telegramId);
   if (local && local.apiKey) return local;
 
-  const rows = await sbGet('users', `?id=eq.${encodeURIComponent(String(telegramId))}&limit=1`);
-  const sbUser = rows && rows[0];
-  if (sbUser && sbUser.is_logged_in === true && sbUser.api_key) {
-    await redisSaveUserKey(telegramId, sbUser.api_key);
-    return { apiKey: sbUser.api_key, connectedAt: Date.now() };
+  const user = await getUser(telegramId);
+  if (user && user.is_logged_in === true && user.api_key) {
+    await redisSaveUserKey(telegramId, user.api_key);
+    return { apiKey: user.api_key, connectedAt: Date.now() };
   }
   return null;
 }
@@ -200,49 +259,7 @@ async function getUserKeySynced(telegramId) {
 async function setUserLogin(telegramId, status, apiKey = null) {
   const updates = { is_logged_in: status };
   if (apiKey !== null) updates.api_key = apiKey;
-  await sbPatch('users', `?id=eq.${encodeURIComponent(String(telegramId))}`, updates);
-}
-// ===== END NEW =====
-
-async function getUser(userId) {
-  const rows = await sbGet('users', `?id=eq.${encodeURIComponent(userId)}&limit=1`);
-  return rows && rows[0] ? rows[0] : null;
-}
-
-async function saveUser(userId, data) {
-  const payload = {
-    id: String(userId), username: data.username || 'user',
-    joined: data.joined || Date.now(), balance: data.balance || 0,
-    links_count: data.links_count || 0, clicks: data.clicks || 0,
-    api_key: data.api_key,
-  };
-  return sbUpsert('users', payload, 'id');
-}
-
-async function createUser(userId, username) {
-  const user = {
-    id: String(userId), username: username || 'user', joined: Date.now(),
-    balance: 0, links_count: 0, clicks: 0,
-    api_key: crypto.randomBytes(16).toString('hex'),
-  };
-  await saveUser(userId, user);
-  return user;
-}
-async function getLink(slug) {
-  const rows = await sbGet('links', `?slug=eq.${encodeURIComponent(slug)}&limit=1`);
-  return rows && rows[0] ? rows[0] : null;
-}
-
-async function saveLink(slug, data) {
-  const payload = {
-    slug, url: data.url, owner_id: String(data.owner_id),
-    views: data.views || 0, created: data.created || Date.now(),
-  };
-  return sbUpsert('links', payload, 'slug');
-}
-
-function escapeHtml(s = '') {
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  await updateUser(telegramId, updates);
 }
 
 function getSenderId(msg) {
@@ -260,7 +277,8 @@ function detectAllUrls(text) {
   }
   return unique;
 }
-  const rateLimitMap = new Map();
+
+const rateLimitMap = new Map();
 function checkRateLimit(userId, maxPerMin = 60) {
   const now = Date.now();
   const key = String(userId);
@@ -280,6 +298,7 @@ async function shortenUrl(longUrl, ownerId) {
   const sig = signSlug(slug);
   const combined = slug + sig;
   await saveLink(slug, { url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now() });
+  console.log(`[Firebase] Link ${slug} saved for user ${ownerId}`);
   return { slug, sig, combined, short: `https://${SHORT_DOMAIN}/${combined}` };
 }
 function landingPageHTML(combined, targetUrl, videoId) {
@@ -379,10 +398,11 @@ app.post('/api/shorten', async (req, res) => {
     const url = req.body.url;
     if (!apiKey) return res.status(401).json({ error: 'Missing API key' });
     if (!url) return res.status(400).json({ error: 'Missing url' });
-    const users = await sbGet('users', `?api_key=eq.${encodeURIComponent(apiKey)}&limit=1`);
-    const user = users && users[0];
+    
+    const user = await getUserByApiKey(apiKey);
     if (!user) return res.status(401).json({ error: 'Invalid API key' });
     if (!checkRateLimit(user.id, 100)) return res.status(429).json({ error: 'Rate limit exceeded' });
+    
     const result = await shortenUrl(url, user.id);
     return res.json({ success: true, short: result.short, slug: result.slug, sig: result.sig });
   } catch (e) { return res.status(500).json({ error: e.message }); }
@@ -396,37 +416,27 @@ app.get('/:combined', async (req, res) => {
   const providedSig = combined.substring(10, 16);
   const expectedSig = signSlug(realSlug);
   if (providedSig !== expectedSig) return res.status(403).send('Invalid or tampered link');
+  
   const link = await getLink(realSlug);
   if (!link) return res.status(404).send('Link not found');
-  await sbPatch('links', `?slug=eq.${encodeURIComponent(realSlug)}`, { views: (link.views || 0) + 1 });
+  
+  await updateLink(realSlug, { views: (link.views || 0) + 1 });
+  
   const user = await getUser(link.owner_id);
   if (user) {
-    await sbPatch('users', `?id=eq.${encodeURIComponent(user.id)}`, {
+    await updateUser(user.id, {
       balance: parseFloat(user.balance || 0) + 0.05,
       clicks: (user.clicks || 0) + 1,
     });
   }
+
   let videoId = '';
   try { const m = link.url.match(/\/v\/([a-f0-9]+)/i); if (m) videoId = m[1]; } catch (e) {}
   return res.send(landingPageHTML(combined, link.url, videoId));
 });
 
 app.listen(PORT, () => console.log(`Web on ${PORT}`));
-          async function waitForApiConnection() {
-  console.log('[BOT] Waiting for central API connection...');
-  while (true) {
-    const cfg = await getCentralConfig();
-    if (cfg && cfg.api_connected === true) {
-      console.log('[BOT] ✅ Central API Connected:', cfg.api_base);
-      return cfg;
-    }
-    console.log('[BOT] ⏳ Not connected yet. Retrying in 10s...');
-    await new Promise(r => setTimeout(r, 10000));
-  }
-}
-(async () => {
-  await waitForApiConnection();
-
+        (async () => {
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
     connectionRetries: 5, autoReconnect: true,
   });
@@ -470,7 +480,10 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
 
     if (text === '/start') {
       let user = await getUser(uid);
-      if (!user) { const sender = await msg.getSender(); user = await createUser(uid, sender?.username || sender?.firstName || 'user'); }
+      if (!user) { 
+        const sender = await msg.getSender(); 
+        user = await saveUser(uid, { username: sender?.username || sender?.firstName || 'user' }); 
+      }
       await sendMenu(chatId, uid);
       return;
     }
@@ -479,18 +492,25 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       const key = text.replace('/api ', '').trim();
       const lang = await getUserLang(uid);
       if (key.length < 12) { await client.sendMessage(chatId, { message: t(lang, 'invalid_key'), parseMode: 'html' }); return; }
-      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: key });
+      
+      let user = await getUser(uid);
+      if (!user) {
+        await saveUser(uid, { api_key: key });
+      } else {
+        await updateUser(uid, { api_key: key });
+      }
+
       await redisSaveUserKey(uid, key);
-      await setUserLogin(uid, true, key); // 🌟 Sync to Supabase for cross-bot login
+      await setUserLogin(uid, true, key);
       await client.sendMessage(chatId, { message: t(lang, 'api_connected'), parseMode: 'html' });
       return;
     }
 
     if (text === '/logout') {
       const lang = await getUserLang(uid);
-      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: '' });
+      await updateUser(uid, { api_key: '' });
       await redisDeleteUserKey(uid);
-      await setUserLogin(uid, false, ''); // 🌟 Sync logout to Supabase
+      await setUserLogin(uid, false, '');
       await client.sendMessage(chatId, { message: t(lang, 'logout_success'), parseMode: 'html' });
       return;
     }
@@ -505,9 +525,11 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     const uid = getSenderId(msg);
     const lang = await getUserLang(uid);
     let user = await getUser(uid);
-    if (!user) { const sender = await msg.getSender(); user = await createUser(uid, sender?.username || 'user'); }
+    if (!user) { 
+      const sender = await msg.getSender(); 
+      user = await saveUser(uid, { username: sender?.username || 'user' }); 
+    }
 
-    // 🌟 Cross-bot session check (login required to convert links)
     const sessionData = await getUserKeySynced(uid);
     if (!sessionData) {
       await client.sendMessage(chatId, { message: t(lang, 'not_logged_in'), parseMode: 'html' });
@@ -522,7 +544,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       const status = await client.sendMessage(chatId, { message: t(lang, 'converting'), parseMode: 'html' });
       try {
         const result = await shortenUrl(urls[0], uid);
-        await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + 1 });
+        await updateUser(uid, { links_count: (user.links_count || 0) + 1 });
         const report = t(lang, 'link_converted') + `\n\n` +
           `<b>${t(lang, 'original')}:</b>\n${escapeHtml(urls[0])}\n\n` +
           `<b>${t(lang, 'smart_link')}:</b>\n${result.short}`;
@@ -545,7 +567,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         results.push(...batchResults);
       }
       const successful = results.filter(r => !r.error);
-      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { links_count: (user.links_count || 0) + successful.length });
+      await updateUser(uid, { links_count: (user.links_count || 0) + successful.length });
       let reportText = t(lang, 'conversion_complete') + `\n\n` +
         `📊 ${t(lang, 'total')}: ${urls.length}\n` +
         `✅ ${t(lang, 'converted')}: ${successful.length}\n\n` +
@@ -565,7 +587,7 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
     const uid = q.userId;
     const lang = await getUserLang(uid);
     let user = await getUser(uid);
-    if (!user) user = await createUser(uid, 'user');
+    if (!user) user = await saveUser(uid, { username: 'user' });
 
     if (data === 'menu_convert') {
       await client.editMessage(chatId, { message: msgId, text: t(lang, 'send_link'), parseMode: 'html', buttons: keyboard([[{ text: t(lang, 'back'), callback_data: 'main_menu' }]]) });
@@ -588,11 +610,6 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
         parseMode: 'html', 
         buttons: keyboard([[{ text: '« Back', callback_data: 'main_menu' }]]) 
       });
-      return;
-    }
-    if (data === 'menu_income') {
-      const balance = parseFloat(user.balance || 0).toFixed(2);
-      await client.editMessage(chatId, { message: msgId, text: `${t(lang, 'your_income')}\n\n<b>${t(lang, 'earnings')}:</b> ₹${balance}\n<b>${t(lang, 'clicks')}:</b> ${user.clicks || 0}\n<b>${t(lang, 'links')}:</b> ${user.links_count || 0}`, parseMode: 'html', buttons: keyboard([[{ text: t(lang, 'back'), callback_data: 'main_menu' }]]) });
       return;
     }
     if (data === 'menu_transfer') {
@@ -630,21 +647,25 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
       return;
     }
     if (data === 'confirm_logout') {
-      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: '' });
+      await updateUser(uid, { api_key: '' });
       await redisDeleteUserKey(uid);
-      await setUserLogin(uid, false, ''); // 🌟 Sync logout to Supabase
+      await setUserLogin(uid, false, '');
       await client.editMessage(chatId, { message: msgId, text: t(lang, 'logout_success'), parseMode: 'html' });
       return;
     }
     if (data === 'main_menu') { await sendMenu(chatId, uid, msgId); return; }
     if (data === 'reset_api') {
       const newKey = crypto.randomBytes(16).toString('hex');
-      await sbPatch('users', `?id=eq.${encodeURIComponent(String(uid))}`, { api_key: newKey });
+      await updateUser(uid, { api_key: newKey });
       await client.editMessage(chatId, { message: msgId, text: `✅ <b>API Reset!</b>\n\n<code>${newKey}</code>`, parseMode: 'html', buttons: keyboard([[{ text: t(lang, 'back'), callback_data: 'main_menu' }]]) });
       return;
     }
   }, new CallbackQuery({}));
 
-  console.log('Bot ready - MayaJaal Converter (Hindi/English)');
+  console.log('Bot ready - MayaJaal Converter (Firebase Powered)');
 })();
-                                         
+
+function escapeHtml(s = '') {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); 
+}
+                         
