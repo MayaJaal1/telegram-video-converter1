@@ -637,7 +637,20 @@ try {
         await sendMenu(chatId, uid);
         return;
       }
-
+      // Agar sirf /api bheja (bina key)
+if (text === '/api') {
+  await client.sendMessage(chatId, {
+    message: `🔑 <b>Connect API Key</b>\n\n` +
+      `<b>Format:</b> <code>/api YOUR_KEY</code>\n\n` +
+      `<b>Example:</b>\n<code>/api abc123def456</code>\n\n` +
+      `📌 <b>Key kahan se milegi?</b>\n` +
+      `Menu → <b>🔌 API Connect</b> → key copy karo`,
+    parseMode: 'html',
+    buttons: keyboard([[{ text: '🔌 API Connect', callback_data: 'menu_api' }]]),
+  });
+  return;
+}
+if (text.startsWith('/api ')) {
       // /api <KEY>
       if (text.startsWith('/api ')) {
         const key = text.replace('/api ', '').trim();
