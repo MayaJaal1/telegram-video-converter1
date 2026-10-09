@@ -8,26 +8,24 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
 const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
 
-// ===== FIREBASE ADMIN INITIALIZATION =====
+// ===== FIREBASE ADMIN INITIALIZATION (JSON file) =====
 let db = null;
 let firebaseReady = false;
 
 try {
   if (!admin.apps.length) {
-    if (process.env.FIREBASE_PROJECT_ID) {
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY
-            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-            : undefined,
-        }),
-      });
-    } else {
-      admin.initializeApp();
+    const keyPath = path.join(__dirname, 'serviceAccountKey.json');
+    if (!fs.existsSync(keyPath)) {
+      throw new Error('Service account JSON not found: ' + keyPath);
     }
+    const serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: serviceAccount.project_id,
+    });
     console.log('[Firebase] Admin initialized');
   }
 
@@ -119,7 +117,6 @@ setInterval(() => {
   const now = Date.now();
   for (const [k, v] of rateLimitMap.entries()) if (now > v.reset) rateLimitMap.delete(k);
 }, 120000);
-
 // ===== TRANSLATIONS =====
 const T = {
   en: {
@@ -207,6 +204,7 @@ function t(lang, key, vars = {}) {
   for (const k in vars) str = str.replace(`{${k}}`, vars[k]);
   return str;
 }
+
 // ===== LANGUAGE HELPERS =====
 async function getUserLang(tgId) {
   if (!redis) return 'en';
@@ -242,8 +240,8 @@ async function saveUser(userId, data) {
       balance: data.balance || 0,
       links_count: data.links_count || 0,
       clicks: data.clicks || 0,
-      api_key: data.api_key || crypto.randomBytes(16).toString('hex'),
-      is_logged_in: data.is_logged_in !== undefined ? data.is_logged_in : true,
+      api_key: data.api_key || '',
+      is_logged_in: data.is_logged_in !== undefined ? data.is_logged_in : false,
     };
     await getDb().collection('users').doc(String(userId)).set(payload, { merge: true });
     return { id: String(userId), ...payload };
@@ -355,15 +353,15 @@ async function setUserLogin(telegramId, status, apiKey = null) {
 
 // ===== SHORTEN URL =====
 async function shortenUrl(longUrl, ownerId) {
-  const slug = crypto.randomBytes(5).toString('hex');      // 10 chars
-  const sig = signSlug(slug);                               // 6 chars
-  const combined = slug + sig;                              // 16 chars total
+  const slug = crypto.randomBytes(5).toString('hex');
+  const sig = signSlug(slug);
+  const combined = slug + sig;
   await saveLink(slug, { url: longUrl, owner_id: String(ownerId), views: 0, created: Date.now() });
   console.log(`[Shorten] ${slug} → user ${ownerId}`);
   return { slug, sig, combined, short: `https://${SHORT_DOMAIN}/${combined}` };
 }
 
-// ===== LANDING PAGE (App deep-link) =====
+// ===== LANDING PAGE =====
 function landingPageHTML(combined, targetUrl, videoId) {
   const androidIntent = `intent://watch?v=${videoId}#Intent;scheme=${APP_SCHEME};package=${APP_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
   const iosScheme = `${APP_SCHEME}://watch?v=${videoId}`;
@@ -477,7 +475,6 @@ app.post('/api/shorten', async (req, res) => {
 app.get('/:combined', async (req, res) => {
   const combined = req.params.combined;
 
-  // Skip reserved paths
   if (combined === 'health' || combined === 'favicon.ico' || combined.startsWith('.')) {
     return res.status(404).end();
   }
@@ -493,7 +490,6 @@ app.get('/:combined', async (req, res) => {
   const link = await getLink(realSlug);
   if (!link) return res.status(404).send('Link not found');
 
-  // Increment views + owner earnings
   await updateLink(realSlug, { views: (link.views || 0) + 1 });
 
   const user = await getUser(link.owner_id);
@@ -504,7 +500,6 @@ app.get('/:combined', async (req, res) => {
     });
   }
 
-  // Extract video ID if target is a /v/... URL
   let videoId = '';
   try {
     const m = link.url.match(/\/v\/([a-f0-9]+)/i);
@@ -528,37 +523,37 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
   await client.start({ botAuthToken: TOKEN });
   console.log('Bot connected!');
 
-// ===== SET MENU BUTTON (blue button) =====
-try {
-  await client.invoke(new Api.bots.SetBotMenuButton({
-    userId: undefined,
-    button: new Api.BotMenuButton({
-      text: '🔗 Open MayaJaal',
-      url: `${BASE_URL}/index.html`
-    })
-  }));
-  console.log('[Menu] ✅ Blue menu button set');
-} catch (e) {
-  console.error('[Menu] Menu button error:', e.message);
-}
+  // ===== SET MENU BUTTON (blue button) =====
+  try {
+    await client.invoke(new Api.bots.SetBotMenuButton({
+      userId: undefined,
+      button: new Api.BotMenuButton({
+        text: '🔗 Open MayaJaal',
+        url: `${BASE_URL}/index.html`
+      })
+    }));
+    console.log('[Menu] ✅ Blue menu button set');
+  } catch (e) {
+    console.error('[Menu] Menu button error:', e.message);
+  }
 
-// ===== SET COMMANDS LIST (/ menu) =====
-try {
-  await client.invoke(new Api.bots.SetBotCommands({
-    scope: new Api.BotCommandScopeDefault(),
-    langCode: '',
-    commands: [
-      new Api.BotCommand({ command: 'start', description: '🚀 Start / Main Menu' }),
-      new Api.BotCommand({ command: 'api', description: '🔑 Connect API Key' }),
-      new Api.BotCommand({ command: 'help', description: '📖 Help & Support' }),
-      new Api.BotCommand({ command: 'logout', description: '🚪 Logout from Bot' })
-    ]
-  }));
-  console.log('[Menu] ✅ Commands list set');
-} catch (e) {
-  console.error('[Menu] Commands error:', e.message);
-}
-  
+  // ===== SET COMMANDS LIST (/ menu) =====
+  try {
+    await client.invoke(new Api.bots.SetBotCommands({
+      scope: new Api.BotCommandScopeDefault(),
+      langCode: '',
+      commands: [
+        new Api.BotCommand({ command: 'start', description: '🚀 Start / Main Menu' }),
+        new Api.BotCommand({ command: 'api', description: '🔑 Connect API Key' }),
+        new Api.BotCommand({ command: 'help', description: '📖 Help & Support' }),
+        new Api.BotCommand({ command: 'logout', description: '🚪 Logout from Bot' })
+      ]
+    }));
+    console.log('[Menu] ✅ Commands list set');
+  } catch (e) {
+    console.error('[Menu] Commands error:', e.message);
+  }
+
   // ===== KEYBOARD HELPER =====
   function keyboard(rows) {
     return new Api.ReplyInlineMarkup({
@@ -637,20 +632,21 @@ try {
         await sendMenu(chatId, uid);
         return;
       }
-      // Agar sirf /api bheja (bina key)
-if (text === '/api') {
-  await client.sendMessage(chatId, {
-    message: `🔑 <b>Connect API Key</b>\n\n` +
-      `<b>Format:</b> <code>/api YOUR_KEY</code>\n\n` +
-      `<b>Example:</b>\n<code>/api abc123def456</code>\n\n` +
-      `📌 <b>Key kahan se milegi?</b>\n` +
-      `Menu → <b>🔌 API Connect</b> → key copy karo`,
-    parseMode: 'html',
-    buttons: keyboard([[{ text: '🔌 API Connect', callback_data: 'menu_api' }]]),
-  });
-  return;
-}
-if (text.startsWith('/api ')) {
+
+      // /api (bina key) — help message
+      if (text === '/api') {
+        await client.sendMessage(chatId, {
+          message: `🔑 <b>Connect API Key</b>\n\n` +
+            `<b>Format:</b> <code>/api YOUR_KEY</code>\n\n` +
+            `<b>Example:</b>\n<code>/api abc123def456</code>\n\n` +
+            `📌 <b>Key kahan se milegi?</b>\n` +
+            `Menu → <b>🔌 API Connect</b> → key copy karo`,
+          parseMode: 'html',
+          buttons: keyboard([[{ text: '🔌 API Connect', callback_data: 'menu_api' }]]),
+        });
+        return;
+      }
+
       // /api <KEY>
       if (text.startsWith('/api ')) {
         const key = text.replace('/api ', '').trim();
@@ -659,7 +655,7 @@ if (text.startsWith('/api ')) {
           return;
         }
 
-        const user = await getOrCreateUser(uid, msg);
+        await getOrCreateUser(uid, msg);
         await updateUser(uid, { api_key: key, is_logged_in: true });
         await redisSaveUserKey(uid, key);
 
