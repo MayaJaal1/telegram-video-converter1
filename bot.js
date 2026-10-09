@@ -528,6 +528,37 @@ app.listen(PORT, () => console.log(`Web on ${PORT}`));
   await client.start({ botAuthToken: TOKEN });
   console.log('Bot connected!');
 
+// ===== SET MENU BUTTON (blue button) =====
+try {
+  await client.invoke(new Api.bots.SetBotMenuButton({
+    userId: undefined,
+    button: new Api.BotMenuButton({
+      text: '🔗 Open MayaJaal',
+      url: `${BASE_URL}/index.html`
+    })
+  }));
+  console.log('[Menu] ✅ Blue menu button set');
+} catch (e) {
+  console.error('[Menu] Menu button error:', e.message);
+}
+
+// ===== SET COMMANDS LIST (/ menu) =====
+try {
+  await client.invoke(new Api.bots.SetBotCommands({
+    scope: new Api.BotCommandScopeDefault(),
+    langCode: '',
+    commands: [
+      new Api.BotCommand({ command: 'start', description: '🚀 Start / Main Menu' }),
+      new Api.BotCommand({ command: 'api', description: '🔑 Connect API Key' }),
+      new Api.BotCommand({ command: 'help', description: '📖 Help & Support' }),
+      new Api.BotCommand({ command: 'logout', description: '🚪 Logout from Bot' })
+    ]
+  }));
+  console.log('[Menu] ✅ Commands list set');
+} catch (e) {
+  console.error('[Menu] Commands error:', e.message);
+}
+  
   // ===== KEYBOARD HELPER =====
   function keyboard(rows) {
     return new Api.ReplyInlineMarkup({
