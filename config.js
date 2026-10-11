@@ -1,20 +1,14 @@
 const admin = require('firebase-admin');
-require('dotenv').config();
+const serviceAccount = require('./serviceAccountKey.json');
 
-// Firebase initialize karna (agar pehle se initialized nahi hai)
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY 
-        ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') 
-        : undefined,
-    }),
+    credential: admin.credential.cert(serviceAccount),
+    databaseURL: process.env.RTDB_URL || "https://mayajaal-app-default-rtdb.firebaseio.com/"
   });
 }
 
-const db = admin.firestore();
+const db = admin.database();
 
 let cachedConfig = null;
 let lastFetch = 0;
@@ -25,18 +19,15 @@ async function getCentralConfig(force = false) {
   }
 
   try {
-    // Firestore se config fetch karna
-    // ⚠️ Dhyan rakhna: 'bot_config' collection aur 'main' document ka naam check kar lena.
-    // Agar tumhare Firebase me structure alag hai, toh yahan change karo.
-    const docRef = db.collection('bot_config').doc('main'); 
-    const doc = await docRef.get();
+    const snapshot = await db.ref('bot_config/main').once('value');
+    const data = snapshot.val();
 
-    if (!doc.exists) {
-      console.warn('[CONFIG] Firebase me bot_config/main document nahi mila!');
-      return cachedConfig; // Purana cache hi return kar do
+    if (!data) {
+      console.warn('[CONFIG] Firebase me bot_config/main nahi mila!');
+      return cachedConfig;
     }
 
-    cachedConfig = doc.data();
+    cachedConfig = data;
     lastFetch = Date.now();
     return cachedConfig;
 
